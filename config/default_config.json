@@ -1,0 +1,39 @@
+{
+  "input_dir": "data",
+  "artifacts_dir": "artifacts",
+  "outputs_dir": "outputs",
+  "logs_dir": "logs",
+  "log_level": "INFO",
+  "max_files": null,
+  "concurrency": 4,
+  "request_timeout": 120,
+  "retry_attempts": 3,
+  "retry_backoff_min": 1,
+  "retry_backoff_max": 20,
+  "resume": true,
+  "dry_run": false,
+  "llm": {
+    "temperature": 0.1,
+    "max_tokens": 2048,
+    "json_mode": true
+  },
+  "qa_generation": {
+    "max_per_section": 4,
+    "type_quota": {
+      "fact": 1,
+      "relation": 1,
+      "multi_evidence": 1,
+      "explanation": 1
+    },
+    "allow_cross_section": false,
+    "allow_cross_document": false,
+    "require_strong_constraints": true,
+    "require_evidence": true,
+    "explanation_min_length": 40,
+    "similarity_threshold": 0.9
+  },
+  "validation": {
+    "support_score_threshold": 0.8,
+    "completeness_score_threshold": 0.75
+  }
+}

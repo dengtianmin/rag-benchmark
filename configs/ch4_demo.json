@@ -1,0 +1,26 @@
+{
+  "name": "ch4_demo",
+  "paths": {
+    "benchmark_dataset": "outputs/two_file_demo/benchmark_dataset.jsonl",
+    "markdown_sections": "artifacts/two_file_demo/markdown_sections.jsonl",
+    "knowledge_extraction": "artifacts/two_file_demo/knowledge_extraction.jsonl",
+    "output_dir": "outputs/experiments/ch4_demo"
+  },
+  "systems": [
+    "traditional_rag",
+    "rewrite_rag",
+    "graph_enhanced_rag",
+    "kbqa_baseline",
+    "ours_ch4"
+  ],
+  "retriever": {
+    "top_k": 4,
+    "expand_k": 2,
+    "neighbor_hops": 1
+  },
+  "generator": {
+    "mode": "extractive_stub",
+    "max_evidence_chars": 600
+  },
+  "limit": 20
+}

@@ -5,7 +5,13 @@
 - `benchmark_builder/`
   - 数据集构造流水线，从 `data/` 中的 Markdown 产品文档出发，完成 section 切分、知识抽取、受约束 QA 生成、证据一致性校验和最终数据集导出。
 - `src/`
-  - 统一实验宿主的研究代码。当前已完成 Step 1：冻结统一数据协议，为后续 `Traditional RAG / Rewrite-RAG / Graph-enhanced RAG / KBQA / Ours-Ch4` 提供共享 schema。
+  - 统一实验宿主的研究代码。当前已完成 Step 1 到 Step 6，已具备：
+    - `Traditional RAG`
+    - `Rewrite-RAG`
+    - `Graph-enhanced RAG`
+    - `KBQA baseline`
+    - `Ours-Ch4`
+    - `Ablation runner`
 
 ## 功能概览
 
@@ -60,7 +66,11 @@ DEEPSEEK_MODEL=deepseek-chat
 ├── src
 │   ├── core
 │   ├── dataio
-│   └── benchmark_host
+│   ├── evaluation
+│   ├── modules
+│   ├── pipelines
+│   ├── prompts
+│   └── retrievers
 ├── tests
 ├── config
 │   └── default_config.json
@@ -72,6 +82,7 @@ DEEPSEEK_MODEL=deepseek-chat
 ├── scripts
 ├── main.py
 ├── pyproject.toml
+├── pytest.ini
 ├── requirements.txt
 └── README.md
 ```
@@ -82,14 +93,20 @@ DEEPSEEK_MODEL=deepseek-chat
 
 - [unified_experiment_host.md](/home/paper/Benchmark/docs/unified_experiment_host.md)
 
-Step 1 已完成的统一协议代码位于：
+统一协议和数据接入代码位于：
 
 - [schema.py](/home/paper/Benchmark/src/core/schema.py)
 - [types.py](/home/paper/Benchmark/src/core/types.py)
 - [loaders.py](/home/paper/Benchmark/src/dataio/loaders.py)
 - [normalizers.py](/home/paper/Benchmark/src/dataio/normalizers.py)
 
-Step 1 的目标是先冻结主项目内部 schema，而不是直接复用任何 `external/` 仓库的数据格式。
+实验宿主核心入口当前包括：
+
+- [traditional_rag.py](/home/paper/Benchmark/src/pipelines/traditional_rag.py)
+- [rewrite_rag.py](/home/paper/Benchmark/src/pipelines/rewrite_rag.py)
+- [graph_enhanced_rag.py](/home/paper/Benchmark/src/pipelines/graph_enhanced_rag.py)
+- [kbqa_baseline.py](/home/paper/Benchmark/src/pipelines/kbqa_baseline.py)
+- [ours_ch4.py](/home/paper/Benchmark/src/pipelines/ours_ch4.py)
 
 ## 使用命令
 
@@ -145,6 +162,104 @@ python scripts/inspect_dataset.py --dataset outputs/two_file_demo/benchmark_data
 ```bash
 pytest tests/test_schema_normalization.py -q
 ```
+
+## 研究型 Baseline 运行
+
+下面这些脚本都直接使用本项目的 benchmark schema 和本地 `jsonl` 数据，不依赖 `external/` 目录运行。
+
+Traditional RAG:
+
+```bash
+python scripts/run_traditional_rag.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --top-k 5 \
+  --output-dir outputs/experiments/traditional_rag
+```
+
+Rewrite-RAG:
+
+```bash
+python scripts/run_rewrite_rag.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --mode entity_relation \
+  --top-k 5 \
+  --output-dir outputs/experiments/rewrite_rag
+```
+
+Graph-enhanced RAG:
+
+```bash
+python scripts/run_graph_enhanced_rag.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --seed-top-k 5 \
+  --expand-k 5 \
+  --top-k 5 \
+  --output-dir outputs/experiments/graph_enhanced_rag
+```
+
+KBQA baseline:
+
+```bash
+python scripts/run_kbqa_baseline.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --entity-mode gold \
+  --relation-mode gold \
+  --output-dir outputs/experiments/kbqa_baseline
+```
+
+Ours-Ch4:
+
+```bash
+python scripts/run_ours_ch4.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --skeleton-mode oracle \
+  --output-dir outputs/experiments/ours_ch4
+```
+
+Ablation:
+
+```bash
+python scripts/run_ablation.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --output-dir outputs/experiments/ablation
+```
+
+所有实验脚本统一输出：
+
+- `predictions.jsonl`
+- `metrics.json`
+
+其中 `run_ablation.py` 会为各变体分别输出结果，并额外生成 `comparison.json`。
+
+## 测试
+
+项目默认已经通过 [pytest.ini](/home/paper/Benchmark/pytest.ini) 忽略 `external/` 目录，因此直接运行：
+
+```bash
+pytest -q
+```
+
+当前默认测试覆盖：
+
+- schema / loader / normalization
+- Traditional RAG
+- Rewrite-RAG
+- Graph-enhanced RAG
+- KBQA baseline
+- Ours-Ch4
 
 ## 每一步输出说明
 
@@ -244,6 +359,10 @@ export DEEPSEEK_BASE_URL=https://api.deepseek.com
 source /home/huang/miniconda3/etc/profile.d/conda.sh
 conda activate paper_benchmark
 ```
+
+6. 为什么直接 `pytest` 不再去跑 `external/` 测试
+
+因为主项目已经通过 [pytest.ini](/home/paper/Benchmark/pytest.ini) 将 `external/` 目录排除。`external/` 仅作为方法参考来源，不是主工程测试对象。
 
 ## 质量控制规则
 
