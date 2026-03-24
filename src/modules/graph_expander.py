@@ -14,6 +14,9 @@ class GraphIndex:
     entity_to_sections: dict[str, set[str]]
     relation_to_sections: dict[str, set[str]]
     entity_to_related_entities: dict[str, set[str]]
+    entity_to_triples: dict[str, list[tuple[str, str, str, str]]]
+    relation_to_triples: dict[str, list[tuple[str, str, str, str]]]
+    section_to_triples: dict[str, list[tuple[str, str, str, str]]]
     section_to_entities: dict[str, set[str]]
     section_to_relations: dict[str, set[str]]
     section_to_constraints: dict[str, set[str]]
@@ -24,6 +27,9 @@ class GraphIndex:
         entity_to_sections: dict[str, set[str]] = defaultdict(set)
         relation_to_sections: dict[str, set[str]] = defaultdict(set)
         entity_to_related_entities: dict[str, set[str]] = defaultdict(set)
+        entity_to_triples: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
+        relation_to_triples: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
+        section_to_triples: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
         section_to_entities: dict[str, set[str]] = {}
         section_to_relations: dict[str, set[str]] = {}
         section_to_constraints: dict[str, set[str]] = {}
@@ -43,6 +49,14 @@ class GraphIndex:
             for relation in record.relations:
                 subject = relation.subject.lower()
                 obj = relation.object.lower()
+                triple = (record.section_id, relation.subject, relation.predicate, relation.object)
+                if subject:
+                    entity_to_triples[subject].append(triple)
+                if obj:
+                    entity_to_triples[obj].append(triple)
+                if relation.predicate:
+                    relation_to_triples[relation.predicate.lower()].append(triple)
+                section_to_triples[record.section_id].append(triple)
                 if subject and obj:
                     entity_to_related_entities[subject].add(obj)
                     entity_to_related_entities[obj].add(subject)
@@ -52,6 +66,9 @@ class GraphIndex:
             entity_to_sections=dict(entity_to_sections),
             relation_to_sections=dict(relation_to_sections),
             entity_to_related_entities=dict(entity_to_related_entities),
+            entity_to_triples=dict(entity_to_triples),
+            relation_to_triples=dict(relation_to_triples),
+            section_to_triples=dict(section_to_triples),
             section_to_entities=section_to_entities,
             section_to_relations=section_to_relations,
             section_to_constraints=section_to_constraints,
