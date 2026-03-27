@@ -5,6 +5,7 @@ from typing import Any
 import requests
 
 from benchmark_builder.clients.deepseek_client import LLMClient, LLMClientError
+import benchmark_builder.config as config_module
 from benchmark_builder.config import Settings, load_settings
 
 
@@ -20,6 +21,7 @@ class _DummyResponse:
 
 
 def test_load_settings_prefers_generic_llm_env_vars(monkeypatch) -> None:
+    monkeypatch.setattr(config_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -41,6 +43,7 @@ def test_load_settings_prefers_generic_llm_env_vars(monkeypatch) -> None:
 
 
 def test_load_settings_falls_back_to_deepseek_env_vars(monkeypatch) -> None:
+    monkeypatch.setattr(config_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
