@@ -11,27 +11,39 @@ from benchmark_builder.config import Settings
 logger = logging.getLogger(__name__)
 
 
-class DeepSeekClientError(RuntimeError):
+class LLMClientError(RuntimeError):
     pass
 
 
-class DeepSeekClient:
+class LLMClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.base_url = settings.deepseek_base_url.rstrip("/")
-        self.api_key = settings.deepseek_api_key
-        self.model = settings.deepseek_model
+        self.provider = settings.llm_provider
+        self.api_style = settings.llm_api_style
+        self.base_url = settings.llm_base_url.rstrip("/")
+        self.api_key = settings.llm_api_key
+        self.model = settings.llm_model
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key) and not self.settings.dry_run
+        return (self.settings.llm_disable_auth or bool(self.api_key)) and not self.settings.dry_run
 
     def _build_url(self) -> str:
+        if self.api_style != "openai":
+            raise LLMClientError(f"Unsupported LLM API style: {self.api_style}")
         if self.base_url.endswith("/chat/completions"):
             return self.base_url
         if self.base_url.endswith("/v1"):
             return f"{self.base_url}/chat/completions"
         return f"{self.base_url}/chat/completions"
+
+    def _build_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if not self.settings.llm_disable_auth:
+            if not self.api_key:
+                raise LLMClientError("LLM_API_KEY is not configured.")
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def chat_completion(
         self,
@@ -42,8 +54,8 @@ class DeepSeekClient:
         max_tokens: int | None = None,
         json_mode: bool | None = None,
     ) -> dict[str, Any]:
-        if not self.api_key:
-            raise DeepSeekClientError("DEEPSEEK_API_KEY is not configured.")
+        if not self.enabled:
+            raise LLMClientError("LLM client is disabled because authentication is not configured.")
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -58,10 +70,7 @@ class DeepSeekClient:
         if use_json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = self._build_headers()
         url = self._build_url()
 
         retrying = Retrying(
@@ -72,7 +81,7 @@ class DeepSeekClient:
                 min=self.settings.retry_backoff_min,
                 max=self.settings.retry_backoff_max,
             ),
-            retry=retry_if_exception_type((requests.RequestException, DeepSeekClientError)),
+            retry=retry_if_exception_type((requests.RequestException, LLMClientError)),
         )
 
         for attempt in retrying:
@@ -85,14 +94,18 @@ class DeepSeekClient:
                 )
                 response.raise_for_status()
                 data = response.json()
-                logger.info("DeepSeek raw response: %s", data)
+                logger.info("%s raw response: %s", self.provider, data)
                 try:
                     content = data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError, TypeError) as exc:
-                    raise DeepSeekClientError(f"Unexpected DeepSeek response: {data}") from exc
+                    raise LLMClientError(f"Unexpected LLM response: {data}") from exc
                 return {
                     "raw": data,
                     "content": content,
                 }
 
-        raise DeepSeekClientError("DeepSeek request failed after retries.")
+        raise LLMClientError("LLM request failed after retries.")
+
+
+DeepSeekClientError = LLMClientError
+DeepSeekClient = LLMClient

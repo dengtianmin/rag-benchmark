@@ -7,7 +7,7 @@ import logging
 from pydantic import BaseModel, Field, ValidationError
 from tqdm import tqdm
 
-from benchmark_builder.clients.deepseek_client import DeepSeekClient
+from benchmark_builder.clients.deepseek_client import LLMClient
 from benchmark_builder.config import Settings
 from benchmark_builder.models import KnowledgeExtractionResult, MarkdownSection, QACandidate
 from benchmark_builder.prompts.qa_generation_prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -107,7 +107,7 @@ def _deduplicate(candidates: list[QACandidate], settings: Settings) -> list[QACa
 
 
 def _generate_one(
-    client: DeepSeekClient,
+    client: LLMClient,
     section: MarkdownSection,
     extraction: KnowledgeExtractionResult,
     settings: Settings,
@@ -157,7 +157,7 @@ def run_generate_qa(settings: Settings) -> list[QACandidate]:
         for item in existing.values():
             completed_sections.add(item.section_id)
 
-    client = DeepSeekClient(settings)
+    client = LLMClient(settings)
     pending = [
         item
         for item in extractions

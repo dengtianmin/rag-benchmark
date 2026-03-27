@@ -7,7 +7,7 @@ import logging
 from pydantic import ValidationError
 from tqdm import tqdm
 
-from benchmark_builder.clients.deepseek_client import DeepSeekClient
+from benchmark_builder.clients.deepseek_client import LLMClient
 from benchmark_builder.config import Settings
 from benchmark_builder.models import MarkdownSection, QACandidate, QAValidationResult
 from benchmark_builder.prompts.qa_validation_prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -23,7 +23,7 @@ def _render_prompt(candidate: QACandidate, section: MarkdownSection) -> str:
     )
 
 
-def _validate_one(client: DeepSeekClient, candidate: QACandidate, section: MarkdownSection, settings: Settings) -> QAValidationResult:
+def _validate_one(client: LLMClient, candidate: QACandidate, section: MarkdownSection, settings: Settings) -> QAValidationResult:
     if settings.dry_run or not client.enabled:
         return QAValidationResult(
             qid=candidate.qid,
@@ -74,7 +74,7 @@ def run_validate_qa(settings: Settings) -> list[QAValidationResult]:
         for item in load_jsonl_as_models(output_path, QAValidationResult):
             existing[item.qid] = item
 
-    client = DeepSeekClient(settings)
+    client = LLMClient(settings)
     results: list[QAValidationResult] = list(existing.values())
     with ThreadPoolExecutor(max_workers=max(1, settings.concurrency)) as executor:
         futures = {

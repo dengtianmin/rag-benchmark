@@ -8,7 +8,7 @@ import logging
 from pydantic import ValidationError
 from tqdm import tqdm
 
-from benchmark_builder.clients.deepseek_client import DeepSeekClient
+from benchmark_builder.clients.deepseek_client import LLMClient
 from benchmark_builder.config import Settings
 from benchmark_builder.models import KnowledgeExtractionPayload, KnowledgeExtractionResult, MarkdownSection
 from benchmark_builder.prompts.knowledge_extraction_prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -37,7 +37,7 @@ def _safe_parse_payload(raw_text: str) -> tuple[KnowledgeExtractionPayload, str 
         return KnowledgeExtractionPayload(), str(exc)
 
 
-def _extract_one(client: DeepSeekClient, section: MarkdownSection, dry_run: bool) -> KnowledgeExtractionResult:
+def _extract_one(client: LLMClient, section: MarkdownSection, dry_run: bool) -> KnowledgeExtractionResult:
     if dry_run or not client.enabled:
         return KnowledgeExtractionResult(
             doc_id=section.doc_id,
@@ -75,7 +75,7 @@ def run_extract_knowledge(settings: Settings) -> list[KnowledgeExtractionResult]
             completed[item.section_id] = item
 
     pending = [section for section in sections if section.section_id not in completed]
-    client = DeepSeekClient(settings)
+    client = LLMClient(settings)
 
     results = list(completed.values())
     if pending:

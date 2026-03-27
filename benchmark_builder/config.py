@@ -55,6 +55,12 @@ class Settings(BaseModel):
     llm: LLMOptions = Field(default_factory=LLMOptions)
     qa_generation: QAGenerationConfig = Field(default_factory=QAGenerationConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    llm_provider: str = "deepseek"
+    llm_api_style: str = "openai"
+    llm_api_key: str | None = None
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+    llm_disable_auth: bool = False
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
@@ -85,9 +91,23 @@ def load_settings(config_path: str | Path | None = None, overrides: dict[str, An
     if overrides:
         raw.update({key: value for key, value in overrides.items() if value is not None})
 
-    raw["deepseek_api_key"] = os.getenv("DEEPSEEK_API_KEY", raw.get("deepseek_api_key"))
-    raw["deepseek_base_url"] = os.getenv("DEEPSEEK_BASE_URL", raw.get("deepseek_base_url", "https://api.deepseek.com"))
-    raw["deepseek_model"] = os.getenv("DEEPSEEK_MODEL", raw.get("deepseek_model", "deepseek-chat"))
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", raw.get("deepseek_api_key"))
+    deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", raw.get("deepseek_base_url", "https://api.deepseek.com"))
+    deepseek_model = os.getenv("DEEPSEEK_MODEL", raw.get("deepseek_model", "deepseek-chat"))
+
+    raw["deepseek_api_key"] = deepseek_api_key
+    raw["deepseek_base_url"] = deepseek_base_url
+    raw["deepseek_model"] = deepseek_model
+
+    raw["llm_provider"] = os.getenv("LLM_PROVIDER", raw.get("llm_provider", "deepseek"))
+    raw["llm_api_style"] = os.getenv("LLM_API_STYLE", raw.get("llm_api_style", "openai"))
+    raw["llm_api_key"] = os.getenv("LLM_API_KEY", raw.get("llm_api_key", deepseek_api_key))
+    raw["llm_base_url"] = os.getenv("LLM_BASE_URL", raw.get("llm_base_url", deepseek_base_url))
+    raw["llm_model"] = os.getenv("LLM_MODEL", raw.get("llm_model", deepseek_model))
+    raw["llm_disable_auth"] = os.getenv(
+        "LLM_DISABLE_AUTH",
+        str(raw.get("llm_disable_auth", False)),
+    ).lower() in {"1", "true", "yes", "on"}
     raw["log_level"] = os.getenv("BENCHMARK_LOG_LEVEL", raw.get("log_level", "INFO"))
 
     settings = Settings.model_validate(raw)
