@@ -56,3 +56,24 @@ def test_run_all_baselines_script_generates_outputs(tmp_path: Path) -> None:
         assert Path(pipeline_summary["predictions"]).exists()
         metrics = json.loads(Path(pipeline_summary["metrics"]).read_text(encoding="utf-8"))
         assert metrics["sample_count"] == 3
+
+
+def test_run_all_baselines_script_reports_missing_inputs() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_all_baselines.py",
+            "--dataset",
+            "outputs/not_exists/benchmark_dataset.jsonl",
+            "--sections",
+            "artifacts/two_file_demo/markdown_sections.jsonl",
+            "--knowledge",
+            "artifacts/two_file_demo/knowledge_extraction.jsonl",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Dataset file not found" in result.stderr
+    assert "outputs/full_run/benchmark_dataset.jsonl" in result.stderr

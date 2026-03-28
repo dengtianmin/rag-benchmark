@@ -8,6 +8,7 @@ from dataio.loaders import load_graph_section_records
 from modules.graph_expander import ExpandedCandidate, GraphExpander, GraphIndex
 from modules.graph_organizer import GraphOrganizer, OrganizedResult
 from pipelines.base import PublicIndex
+from retrievers.text_retriever import LexicalTextRetriever, SupportsRetrieve
 
 
 @dataclass(slots=True)
@@ -33,11 +34,13 @@ class GraphRetriever:
         *,
         text_index: PublicIndex,
         graph_index: GraphIndex,
+        seed_retriever: SupportsRetrieve | None = None,
         config: GraphRetrieverConfig | None = None,
     ) -> None:
         self.text_index = text_index
         self.graph_index = graph_index
         self.config = config or GraphRetrieverConfig()
+        self.seed_retriever = seed_retriever or LexicalTextRetriever(text_index)
         self.expander = GraphExpander(graph_index)
         self.organizer = GraphOrganizer(text_index, graph_index)
 
@@ -47,15 +50,16 @@ class GraphRetriever:
         *,
         sections_path: str | Path,
         knowledge_path: str | Path,
+        seed_retriever: SupportsRetrieve | None = None,
         config: GraphRetrieverConfig | None = None,
     ) -> "GraphRetriever":
         text_index = PublicIndex.from_markdown_sections(sections_path)
         graph_records = load_graph_section_records(knowledge_path)
         graph_index = GraphIndex.build(graph_records)
-        return cls(text_index=text_index, graph_index=graph_index, config=config)
+        return cls(text_index=text_index, graph_index=graph_index, seed_retriever=seed_retriever, config=config)
 
     def retrieve(self, sample: BenchmarkSample) -> GraphRetrieveOutput:
-        seed_documents = self.text_index.search(sample.question, top_k=self.config.seed_top_k)
+        seed_documents = self.seed_retriever.retrieve(sample.question, top_k=self.config.seed_top_k)
         expanded_candidates = self.expander.expand(
             sample,
             seed_documents,
