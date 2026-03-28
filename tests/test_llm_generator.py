@@ -136,7 +136,14 @@ def test_mock_generator_keeps_selected_evidence_indices_metadata() -> None:
 def test_rag_prompt_builder_uses_numbered_evidence_in_chinese() -> None:
     prompt = RAGPromptBuilder().build_prompt(question=_sample().question, retrieved_documents=_documents())
 
-    assert "只返回合法 JSON" in prompt
+    assert "请仅依据给定的编号证据回答问题" in prompt
+    assert "不要使用外部知识，不要猜测" in prompt
+    assert "只能输出合法 JSON" in prompt
+    assert "不要输出 markdown，不要输出代码块" in prompt
     assert '输出格式：{"answer":"...","supporting_evidence":[1,2]}' in prompt
+    assert '{"answer":"无法根据已检索到的证据确定答案","supporting_evidence":[]}' in prompt
+    assert "answer 中不要重复问题" in prompt
+    assert "保留关键实体、数字、单位、型号、版本号的原始写法" in prompt
+    assert "如果是是非题，优先输出“是”或“否”" in prompt
     assert "[1]" in prompt
     assert "[2]" in prompt

@@ -32,15 +32,25 @@ class RAGPromptBuilder:
         context = self.build_context(retrieved_documents)
         return (
             "你是一个面向企业产品文档问答的模型。\n"
-            "你只能根据给定的编号证据片段回答问题。\n\n"
-            "只返回合法 JSON。\n"
-            "不要输出 Markdown、代码块、解释、说明或任何额外文本。\n\n"
-            "规则：\n"
-            '1. "answer" 必须是尽量短、适合严格评测的最终答案。\n'
-            '2. "supporting_evidence" 必须是证据编号数组，只能使用上下文中实际出现过的编号。\n'
-            '3. 如果证据不足，"answer" 必须固定为 "无法根据已检索到的证据确定答案"。\n'
-            '4. 如果证据不足，"supporting_evidence" 必须为 []。\n\n'
+            "请仅依据给定的编号证据回答问题，不要使用外部知识，不要猜测，不要补充未在证据中明确出现的信息。\n\n"
+            "你的输出必须满足以下要求：\n"
+            "1. 只能输出合法 JSON。\n"
+            "2. 不要输出 markdown，不要输出代码块，不要输出解释、分析过程或额外文字。\n"
+            "3. JSON 必须严格满足以下格式：\n"
             '输出格式：{"answer":"...","supporting_evidence":[1,2]}\n\n'
+            "其中：\n"
+            '- "answer"：最终答案，必须尽可能短，适合严格评测。\n'
+            '- "supporting_evidence"：你实际使用到的证据编号列表，只能填写下方证据中出现过的编号。\n'
+            "如果证据不足以回答问题，请输出：\n"
+            '{"answer":"无法根据已检索到的证据确定答案","supporting_evidence":[]}\n\n'
+            "额外约束：\n"
+            "- answer 中不要重复问题。\n"
+            "- answer 中不要包含推理过程。\n"
+            "- answer 尽量复用证据中的原始表述。\n"
+            "- 保留关键实体、数字、单位、型号、版本号的原始写法。\n"
+            "- 如果是列表题，用最简洁形式作答。\n"
+            "- 如果是是非题，优先输出“是”或“否”；只有在确有必要时再补充极短说明。\n"
+            "- supporting_evidence 只保留真正支撑答案的编号，不要滥选。\n\n"
             f"问题：\n{question}\n\n"
-            f"编号证据：\n{context}\n"
+            f"证据：\n{context}\n"
         )
