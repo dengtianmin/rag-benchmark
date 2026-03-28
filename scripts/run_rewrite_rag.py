@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -72,7 +74,7 @@ def main() -> None:
             trace_metadata=build_trace_metadata(settings),
         ),
     )
-    records = [pipeline.run(sample) for sample in samples]
+    records = [pipeline.run(sample) for sample in tqdm(samples, desc="Rewrite-RAG")]
     metrics = {
         "method_name": pipeline.method_name,
         "rewrite_mode": args.mode,

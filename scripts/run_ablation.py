@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -53,7 +55,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = []
-    for mode in ABLATIONS:
+    for mode in tqdm(ABLATIONS, desc="Ablation modes"):
         config = OursCh4Config.from_ablation(mode, top_k=args.top_k, skeleton_mode=args.skeleton_mode)
         config.retrieval_mode = settings.retrieval.mode
         config.rerank = settings.rerank.enabled
@@ -69,7 +71,7 @@ def main() -> None:
             reranker=reranker,
             generator=generator,
         )
-        records = [pipeline.run(sample) for sample in samples]
+        records = [pipeline.run(sample) for sample in tqdm(samples, desc=f"Ablation {mode}", leave=False)]
         metrics = {
             "mode": mode,
             "retrieval_mode": settings.retrieval.mode,

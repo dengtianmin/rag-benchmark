@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -47,7 +49,7 @@ def main() -> None:
         KBExecutor(graph_index, text_index),
         config=KBQABaselineConfig(top_k=args.top_k, entity_mode=args.entity_mode, relation_mode=args.relation_mode),
     )
-    records = [pipeline.run(sample) for sample in samples]
+    records = [pipeline.run(sample) for sample in tqdm(samples, desc="KBQA baseline")]
     metrics = {
         "method_name": pipeline.method_name,
         "sample_count": len(records),
