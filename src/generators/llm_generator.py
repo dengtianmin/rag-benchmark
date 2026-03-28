@@ -11,8 +11,9 @@ from prompts.rag_prompt_builder import RAGPromptBuilder
 
 
 JSON_BLOCK_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
+CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 SENTENCE_SPLIT_PATTERN = re.compile(r"[。！？!?;\n]+")
-DEFAULT_INSUFFICIENT_ANSWER = "根据当前检索证据，无法确定答案。"
+STANDARD_INSUFFICIENT_ANSWER = "无法根据已检索到的证据确定答案"
 
 
 class LLMGenerator:
@@ -80,35 +81,16 @@ class LLMGenerator:
 
     def _build_system_prompt(self) -> str:
         return (
-            "You answer enterprise product QA strictly from retrieved evidence.\n"
-            "Return valid JSON only.\n"
-            "Do not invent evidence, document ids, or section ids.\n"
-            "If the evidence is insufficient, set insufficient=true and keep the answer concise."
+            "你是企业产品文档问答模型。\n"
+            "只能根据提供的编号证据回答。\n"
+            "只返回合法 JSON，不要输出 Markdown、代码块、解释或额外文本。"
         )
 
     def _build_user_prompt(self, sample: BenchmarkSample, documents: list[RetrievedDocument]) -> str:
-        context = self.prompt_builder.build_context(documents)
-        evidence_guide = "\n".join(
-            f"[{index}] DOC={document.source_id} SECTION={document.section_id}"
-            for index, document in enumerate(documents)
-        )
-        return (
-            "Answer the question using only the retrieved context.\n"
-            "Output JSON with keys: answer_text, answer_short, answer_long, used_evidence_indices, confidence, insufficient.\n"
-            "Rules:\n"
-            "- used_evidence_indices must be a JSON array of integer indices from the provided evidence list.\n"
-            "- answer_text is required.\n"
-            "- answer_short should be short and directly gradable when possible.\n"
-            "- answer_long may be empty if not needed.\n"
-            "- confidence must be a number between 0 and 1 when provided.\n"
-            "- If the answer cannot be determined, set insufficient=true and explain briefly.\n\n"
-            f"Question:\n{sample.question}\n\n"
-            f"Evidence Index Map:\n{evidence_guide}\n\n"
-            f"Retrieved Context:\n{context}\n"
-        )
+        return self.prompt_builder.build_prompt(question=sample.question, retrieved_documents=documents)
 
     def _parse_payload(self, content: str) -> dict[str, Any]:
-        stripped = content.strip()
+        stripped = self._strip_code_fences(content.strip())
         candidates = [stripped]
         match = JSON_BLOCK_PATTERN.search(stripped)
         if match:
@@ -122,42 +104,28 @@ class LLMGenerator:
                 return payload
         raise ValueError("LLM returned invalid JSON content.")
 
+    def _strip_code_fences(self, content: str) -> str:
+        return CODE_FENCE_PATTERN.sub("", content).strip()
+
     def _build_answer_result(
         self,
         sample: BenchmarkSample,
         documents: list[RetrievedDocument],
         payload: dict[str, Any],
     ) -> AnswerResult:
-        answer_text = str(payload.get("answer_text", "")).strip()
-        answer_short = str(payload.get("answer_short", "")).strip()
-        answer_long = str(payload.get("answer_long", "")).strip()
-        insufficient = bool(payload.get("insufficient", False))
-
-        if insufficient and not answer_text:
-            answer_text = DEFAULT_INSUFFICIENT_ANSWER
-        if not answer_text:
-            answer_text = answer_short or answer_long
-        if not answer_text:
-            raise ValueError("LLM returned no usable answer fields.")
-        if not answer_short:
-            answer_short = answer_text
-
-        confidence = payload.get("confidence")
-        if confidence is not None:
-            confidence = float(confidence)
-            confidence = max(0.0, min(1.0, confidence))
-
-        supporting_evidence = self._build_supporting_evidence(documents, payload.get("used_evidence_indices", []))
+        answer_text = str(payload.get("answer", "")).strip() or STANDARD_INSUFFICIENT_ANSWER
+        supporting_indices = self._normalize_indices(payload.get("supporting_evidence", []), len(documents))
+        supporting_evidence = self._build_supporting_evidence(documents, supporting_indices)
         return AnswerResult(
             question_id=sample.question_id,
             answer_text=answer_text,
-            answer_short=answer_short,
-            answer_long=answer_long,
+            answer_short=answer_text,
+            answer_long="",
             supporting_evidence=supporting_evidence,
-            confidence=confidence,
             metadata={
-                "insufficient": insufficient,
-                "used_evidence_indices": self._normalize_indices(payload.get("used_evidence_indices", []), len(documents)),
+                "insufficient": answer_text == STANDARD_INSUFFICIENT_ANSWER,
+                "selected_evidence_indices": supporting_indices,
+                "parsed_json": payload,
             },
         )
 
@@ -169,7 +137,7 @@ class LLMGenerator:
         indices = self._normalize_indices(used_indices, len(documents))
         evidence: list[EvidenceItem] = []
         for index in indices:
-            document = documents[index]
+            document = documents[index - 1]
             evidence.append(
                 EvidenceItem(
                     source_id=document.source_id,
@@ -188,7 +156,7 @@ class LLMGenerator:
                 index = int(item)
             except (TypeError, ValueError):
                 continue
-            if 0 <= index < limit and index not in normalized:
+            if 1 <= index <= limit and index not in normalized:
                 normalized.append(index)
         return normalized
 
@@ -207,15 +175,35 @@ class LLMGenerator:
         reason: str,
         metadata_overrides: dict[str, Any] | None = None,
     ) -> AnswerResult:
-        fallback = self.fallback_generator.generate(sample, documents)
+        supporting_evidence = []
+        if documents:
+            supporting_evidence = self._build_supporting_evidence(documents, [])
         metadata = {
-            **fallback.metadata,
+            "generator": "llm_generator",
+            "model_name": getattr(self.client, "model", None),
+            "base_url": getattr(self.client, "base_url", None),
+            "latency_ms": 0,
+            "prompt_chars": 0,
+            "completion_chars": len(STANDARD_INSUFFICIENT_ANSWER),
+            "finish_reason": "fallback",
             "fallback_used": True,
             "fallback_reason": reason,
-            "fallback_generator": "mock_generator",
+            "fallback_generator": "json_safe_fallback",
             "requested_generator": "llm_generator",
+            "parsed_json": {
+                "answer": STANDARD_INSUFFICIENT_ANSWER,
+                "supporting_evidence": [],
+            },
+            "selected_evidence_indices": [],
+            "no_retrieval": not documents,
         }
         if metadata_overrides:
             metadata.update(metadata_overrides)
-        fallback.metadata = metadata
-        return fallback
+        return AnswerResult(
+            question_id=sample.question_id,
+            answer_text=STANDARD_INSUFFICIENT_ANSWER,
+            answer_short=STANDARD_INSUFFICIENT_ANSWER,
+            answer_long="",
+            supporting_evidence=[],
+            metadata=metadata,
+        )

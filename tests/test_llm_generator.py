@@ -3,8 +3,9 @@ from __future__ import annotations
 from core.schema import BenchmarkSample, RetrievedDocument
 from core.types import QuestionType, SourceScope
 from generators import build_generator
-from generators.llm_generator import LLMGenerator
+from generators.llm_generator import LLMGenerator, STANDARD_INSUFFICIENT_ANSWER
 from pipelines.base import MockGenerator
+from prompts.rag_prompt_builder import RAGPromptBuilder
 from runtime_config import RuntimeSettings
 
 
@@ -76,12 +77,8 @@ def test_llm_generator_builds_answer_result_from_json() -> None:
     generator = LLMGenerator(
         client=_FakeClient(
             content=(
-                '{"answer_text":"北京市朝阳区广顺南大街8号院利星行中心1号楼",'
-                '"answer_short":"北京市朝阳区广顺南大街8号院利星行中心1号楼",'
-                '"answer_long":"",'
-                '"used_evidence_indices":[0],'
-                '"confidence":0.92,'
-                '"insufficient":false}'
+                '{"answer":"北京市朝阳区广顺南大街8号院利星行中心1号楼",'
+                '"supporting_evidence":[1]}'
             )
         )
     )
@@ -89,10 +86,12 @@ def test_llm_generator_builds_answer_result_from_json() -> None:
     result = generator.generate(_sample(), _documents())
 
     assert result.answer_text == "北京市朝阳区广顺南大街8号院利星行中心1号楼"
+    assert result.answer_short == "北京市朝阳区广顺南大街8号院利星行中心1号楼"
     assert result.supporting_evidence[0].source_id == "doc1"
     assert result.supporting_evidence[0].section_id == "sec1"
     assert result.metadata["generator"] == "llm_generator"
     assert result.metadata["fallback_used"] is False
+    assert result.metadata["selected_evidence_indices"] == [1]
 
 
 def test_llm_generator_falls_back_to_mock_on_invalid_json() -> None:
@@ -100,8 +99,33 @@ def test_llm_generator_falls_back_to_mock_on_invalid_json() -> None:
 
     result = generator.generate(_sample(), _documents())
 
-    assert result.metadata["generator"] == "mock_generator"
+    assert result.metadata["generator"] == "llm_generator"
     assert result.metadata["fallback_used"] is True
-    assert result.metadata["fallback_generator"] == "mock_generator"
+    assert result.metadata["fallback_generator"] == "json_safe_fallback"
     assert result.metadata["requested_generator"] == "llm_generator"
     assert result.metadata["fallback_reason"] == "LLM returned invalid JSON content."
+    assert result.answer_text == STANDARD_INSUFFICIENT_ANSWER
+    assert result.supporting_evidence == []
+
+
+def test_llm_generator_strips_code_fence_and_filters_duplicate_indices() -> None:
+    generator = LLMGenerator(
+        client=_FakeClient(
+            content='```json\n{"answer":"北京市朝阳区广顺南大街8号院利星行中心1号楼","supporting_evidence":[1,1,3,"x",0,-1]}\n```'
+        )
+    )
+
+    result = generator.generate(_sample(), _documents())
+
+    assert result.answer_text == "北京市朝阳区广顺南大街8号院利星行中心1号楼"
+    assert [item.section_id for item in result.supporting_evidence] == ["sec1"]
+    assert result.metadata["selected_evidence_indices"] == [1]
+
+
+def test_rag_prompt_builder_uses_numbered_evidence_in_chinese() -> None:
+    prompt = RAGPromptBuilder().build_prompt(question=_sample().question, retrieved_documents=_documents())
+
+    assert "只返回合法 JSON" in prompt
+    assert '输出格式：{"answer":"...","supporting_evidence":[1,2]}' in prompt
+    assert "[1]" in prompt
+    assert "[2]" in prompt
