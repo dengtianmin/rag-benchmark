@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from dataio.loaders import load_benchmark_samples, load_graph_section_records
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
+from generators import build_generator
 from modules.graph_expander import GraphIndex
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractor
@@ -48,6 +49,7 @@ def main() -> None:
     text_index = PublicIndex.from_markdown_sections(args.sections)
     text_retriever = build_text_retriever(index=text_index, settings=settings)
     graph_index = GraphIndex.build(load_graph_section_records(args.knowledge))
+    generator = build_generator(settings)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = []
@@ -65,6 +67,7 @@ def main() -> None:
             TextCompensator(text_index, graph_index, text_retriever=text_retriever),
             config=config,
             reranker=reranker,
+            generator=generator,
         )
         records = [pipeline.run(sample) for sample in samples]
         metrics = {

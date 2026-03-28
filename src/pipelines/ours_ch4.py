@@ -8,7 +8,7 @@ from core.schema import BenchmarkSample, PipelineRunRecord
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractor
 from modules.text_compensator import TextCompensator
-from pipelines.base import BasePipeline, MockGenerator, MockReranker, PublicIndex
+from pipelines.base import BasePipeline, MockGenerator, MockReranker, PublicIndex, SupportsGenerate
 
 
 AblationMode = Literal["full", "w/o_relation_driven", "w/o_skeleton_rewrite", "w/o_text_compensation"]
@@ -51,7 +51,7 @@ class OursCh4Pipeline(BasePipeline):
         *,
         config: OursCh4Config | None = None,
         reranker: Any | None = None,
-        generator: MockGenerator | None = None,
+        generator: SupportsGenerate | None = None,
     ) -> None:
         self.text_index = text_index
         self.skeleton_extractor = skeleton_extractor

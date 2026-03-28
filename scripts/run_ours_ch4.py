@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from dataio.loaders import load_benchmark_samples, load_graph_section_records
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
+from generators import build_generator
 from modules.graph_expander import GraphIndex
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractor
@@ -54,6 +55,7 @@ def main() -> None:
         trace_metadata=build_trace_metadata(settings),
     )
     reranker = None if args.disable_rerank else build_reranker(settings)
+    generator = build_generator(settings)
     pipeline = OursCh4Pipeline(
         text_index,
         SkeletonExtractor(graph_index),
@@ -61,6 +63,7 @@ def main() -> None:
         TextCompensator(text_index, graph_index, text_retriever=text_retriever),
         config=config,
         reranker=reranker,
+        generator=generator,
     )
     records = [pipeline.run(sample) for sample in samples]
     metrics = {

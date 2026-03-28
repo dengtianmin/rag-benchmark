@@ -69,6 +69,16 @@
     "max_retries": 1,
     "top_n": 5,
     "allow_mock_fallback": false
+  },
+  "generator": {
+    "backend": "mock",
+    "api_key": null,
+    "base_url": "https://api.openai.com/v1",
+    "model": "",
+    "timeout": 60,
+    "max_tokens": 512,
+    "temperature": 0.0,
+    "json_mode": true
   }
 
 }

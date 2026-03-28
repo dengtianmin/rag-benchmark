@@ -90,11 +90,28 @@ class RerankConfig(BaseModel):
         return self
 
 
+class GeneratorConfig(BaseModel):
+    backend: str = "mock"
+    api_key: str | None = None
+    base_url: str = "https://api.openai.com/v1"
+    model: str = ""
+    timeout: float = 60.0
+    max_tokens: int = 512
+    temperature: float = 0.0
+    json_mode: bool = True
+
+    @model_validator(mode="after")
+    def normalize_base_url(self) -> "GeneratorConfig":
+        self.base_url = self.base_url.rstrip("/")
+        return self
+
+
 class RuntimeSettings(BaseModel):
     log_level: str = "INFO"
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     rerank: RerankConfig = Field(default_factory=RerankConfig)
+    generator: GeneratorConfig = Field(default_factory=GeneratorConfig)
 
 
 def build_trace_metadata(settings: RuntimeSettings) -> dict[str, Any]:
@@ -107,6 +124,7 @@ def build_trace_metadata(settings: RuntimeSettings) -> dict[str, Any]:
         "rerank_backend": settings.rerank.backend,
         "rerank_url": settings.rerank.tei_url if settings.rerank.backend == "tei" else None,
         "rerank_top_n": settings.rerank.top_n,
+        "generator_backend": settings.generator.backend,
     }
 
 
@@ -182,10 +200,30 @@ def load_runtime_settings(
         bool(rerank_raw.get("allow_mock_fallback", False)),
     )
 
+    generator_raw = dict(raw.get("generator", {}))
+    generator_raw["backend"] = os.getenv("GENERATOR_BACKEND", generator_raw.get("backend", "mock"))
+    generator_raw["api_key"] = os.getenv("GENERATOR_API_KEY", generator_raw.get("api_key"))
+    generator_raw["base_url"] = os.getenv(
+        "GENERATOR_BASE_URL",
+        generator_raw.get("base_url", "https://api.openai.com/v1"),
+    )
+    generator_raw["model"] = os.getenv("GENERATOR_MODEL", generator_raw.get("model", ""))
+    generator_raw["timeout"] = _env_float("GENERATOR_TIMEOUT", float(generator_raw.get("timeout", 60)))
+    generator_raw["max_tokens"] = _env_int("GENERATOR_MAX_TOKENS", int(generator_raw.get("max_tokens", 512)))
+    generator_raw["temperature"] = _env_float(
+        "GENERATOR_TEMPERATURE",
+        float(generator_raw.get("temperature", 0.0)),
+    )
+    generator_raw["json_mode"] = _env_bool(
+        "GENERATOR_JSON_MODE",
+        bool(generator_raw.get("json_mode", True)),
+    )
+
     payload = {
         "log_level": os.getenv("BENCHMARK_LOG_LEVEL", raw.get("log_level", "INFO")),
         "embedding": embedding_raw,
         "retrieval": retrieval_raw,
         "rerank": rerank_raw,
+        "generator": generator_raw,
     }
     return RuntimeSettings.model_validate(payload)

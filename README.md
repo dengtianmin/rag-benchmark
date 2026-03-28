@@ -67,6 +67,21 @@ RERANK_TOP_N=5
 RERANK_ALLOW_MOCK_FALLBACK=false
 ```
 
+如果你要启用真实大模型 generator，而不是默认的 `MockGenerator`，补充这些变量：
+
+```bash
+GENERATOR_BACKEND=llm
+GENERATOR_API_KEY=your_api_key_here
+GENERATOR_BASE_URL=https://api.openai.com/v1
+GENERATOR_MODEL=gpt-4o-mini
+GENERATOR_TIMEOUT=60
+GENERATOR_MAX_TOKENS=512
+GENERATOR_TEMPERATURE=0
+GENERATOR_JSON_MODE=true
+```
+
+未配置 `GENERATOR_API_KEY` / `GENERATOR_MODEL`，或 LLM 调用失败、返回非法 JSON 时，会自动回退到本地 `MockGenerator`。
+
 ## 目录结构
 
 ```text
@@ -207,6 +222,11 @@ export RERANK_TOP_N=5
 Traditional RAG:
 
 ```bash
+export GENERATOR_BACKEND=llm
+export GENERATOR_API_KEY=your_api_key_here
+export GENERATOR_BASE_URL=https://api.openai.com/v1
+export GENERATOR_MODEL=gpt-4o-mini
+
 python scripts/run_traditional_rag.py \
   --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \

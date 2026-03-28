@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from dataio.loaders import load_benchmark_samples
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
+from generators import build_generator
 from pipelines.base import PublicIndex
 from pipelines.graph_enhanced_rag import (
     GraphEnhancedRAGConfig,
@@ -70,7 +71,8 @@ def main() -> None:
         config=build_graph_retriever_config(pipeline_config),
     )
     reranker = None if args.disable_rerank else build_reranker(settings)
-    pipeline = GraphEnhancedRAGPipeline(retriever, config=pipeline_config, reranker=reranker)
+    generator = build_generator(settings)
+    pipeline = GraphEnhancedRAGPipeline(retriever, config=pipeline_config, reranker=reranker, generator=generator)
     records = [pipeline.run(sample) for sample in samples]
 
     metrics = {

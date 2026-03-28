@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.schema import BenchmarkSample, PipelineRunRecord
-from pipelines.base import BasePipeline, MockGenerator, MockReranker, PublicIndex
+from pipelines.base import BasePipeline, MockGenerator, MockReranker, PublicIndex, SupportsGenerate
 from retrievers.text_retriever import LexicalTextRetriever, SupportsRetrieve
 
 
@@ -27,7 +27,7 @@ class TraditionalRAGPipeline(BasePipeline):
         config: TraditionalRAGConfig | None = None,
         retriever: SupportsRetrieve | None = None,
         reranker: Any | None = None,
-        generator: MockGenerator | None = None,
+        generator: SupportsGenerate | None = None,
     ) -> None:
         self.index = index
         self.config = config or TraditionalRAGConfig()

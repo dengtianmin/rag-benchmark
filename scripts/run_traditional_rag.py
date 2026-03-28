@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from dataio.loaders import load_benchmark_samples
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
+from generators import build_generator
 from pipelines.base import PublicIndex
 from pipelines.traditional_rag import TraditionalRAGConfig, TraditionalRAGPipeline
 from retrievers import build_reranker, build_text_retriever
@@ -55,10 +56,12 @@ def main() -> None:
     index = PublicIndex.from_markdown_sections(args.sections)
     retriever = build_text_retriever(index=index, settings=settings)
     reranker = None if args.disable_rerank else build_reranker(settings)
+    generator = build_generator(settings)
     pipeline = TraditionalRAGPipeline(
         index=index,
         retriever=retriever,
         reranker=reranker,
+        generator=generator,
         config=TraditionalRAGConfig(
             top_k=args.top_k,
             rerank=(not args.disable_rerank) and settings.rerank.enabled,

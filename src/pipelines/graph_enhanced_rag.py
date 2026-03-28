@@ -5,7 +5,7 @@ from typing import Any
 
 from core.schema import BenchmarkSample, PipelineRunRecord
 from evaluation.retrieval_metrics import hit_at_k
-from pipelines.base import BasePipeline, MockGenerator, MockReranker
+from pipelines.base import BasePipeline, MockGenerator, MockReranker, SupportsGenerate
 from retrievers.graph_retriever import GraphRetriever, GraphRetrieverConfig
 
 
@@ -41,7 +41,7 @@ class GraphEnhancedRAGPipeline(BasePipeline):
         *,
         config: GraphEnhancedRAGConfig | None = None,
         reranker: Any | None = None,
-        generator: MockGenerator | None = None,
+        generator: SupportsGenerate | None = None,
     ) -> None:
         self.retriever = retriever
         self.config = config or GraphEnhancedRAGConfig()

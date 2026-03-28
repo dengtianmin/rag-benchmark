@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 from dataio.loaders import load_benchmark_samples, load_graph_section_records
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
+from generators import build_generator
 from modules.entity_linker import EntityLinker
 from modules.graph_expander import GraphIndex
 from modules.kb_executor import KBExecutor
@@ -130,6 +131,7 @@ def main() -> None:
     rerank_enabled = (not args.disable_rerank) and settings.rerank.enabled
     text_retriever = build_text_retriever(index=text_index, settings=settings)
     reranker = None if args.disable_rerank else build_reranker(settings)
+    generator = build_generator(settings)
     trace_metadata = build_trace_metadata(settings)
 
     summary: dict[str, Any] = {
@@ -145,6 +147,7 @@ def main() -> None:
         index=text_index,
         retriever=text_retriever,
         reranker=reranker,
+        generator=generator,
         config=TraditionalRAGConfig(
             top_k=args.top_k,
             rerank=rerank_enabled,
@@ -171,6 +174,7 @@ def main() -> None:
         index=text_index,
         retriever=text_retriever,
         reranker=reranker,
+        generator=generator,
         config=RewriteRAGConfig(
             top_k=args.top_k,
             rerank=rerank_enabled,
@@ -217,7 +221,12 @@ def main() -> None:
         seed_retriever=text_retriever,
         config=build_graph_retriever_config(graph_config),
     )
-    graph_pipeline = GraphEnhancedRAGPipeline(graph_retriever, config=graph_config, reranker=reranker)
+    graph_pipeline = GraphEnhancedRAGPipeline(
+        graph_retriever,
+        config=graph_config,
+        reranker=reranker,
+        generator=generator,
+    )
     graph_records_out = _run_pipeline_with_progress(samples, graph_pipeline, "Graph-enhanced RAG")
     graph_metrics = {
         "method_name": graph_pipeline.method_name,
@@ -278,6 +287,7 @@ def main() -> None:
         RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
         TextCompensator(text_index, graph_index, text_retriever=text_retriever),
         reranker=reranker,
+        generator=generator,
         config=OursCh4Config(
             top_k=args.top_k,
             skeleton_mode=args.skeleton_mode,
@@ -328,6 +338,7 @@ def main() -> None:
                 TextCompensator(text_index, graph_index, text_retriever=text_retriever),
                 config=config,
                 reranker=reranker,
+                generator=generator,
             )
             records = _run_pipeline_with_progress(samples, pipeline, f"Ablation {mode}")
             metrics = {

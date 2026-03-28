@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from core.schema import AnswerResult, BenchmarkSample, PipelineRunRecord, RetrievalResult, RetrievedDocument
 from core.types import RetrievalMode
@@ -196,10 +196,23 @@ class MockGenerator:
             supporting_evidence=supporting_evidence,
             metadata={
                 "generator": "mock_generator",
+                "model_name": None,
+                "base_url": None,
+                "latency_ms": 0,
+                "prompt_chars": len(prompt),
+                "completion_chars": len(answer_text),
+                "finish_reason": "mock",
+                "fallback_used": False,
+                "fallback_reason": None,
                 "no_retrieval": not documents,
                 "prompt_preview": prompt[:400],
             },
         )
+
+
+class SupportsGenerate(Protocol):
+    def generate(self, sample: BenchmarkSample, documents: list[RetrievedDocument]) -> AnswerResult:
+        ...
 
 
 class BasePipeline:
