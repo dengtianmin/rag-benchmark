@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.schema import RetrievedDocument
 from dataio.loaders import load_benchmark_samples, load_graph_section_records
 from modules.entity_linker import EntityLinker
 from modules.graph_expander import GraphIndex
@@ -13,6 +14,24 @@ from modules.text_compensator import TextCompensator
 from pipelines.base import PublicIndex
 from pipelines.kbqa_baseline import KBQABaselineConfig, KBQABaselinePipeline
 from pipelines.ours_ch4 import OursCh4Config, OursCh4Pipeline, summarize_ablation
+
+
+class _FakeRetriever:
+    def __init__(self, docs: list[RetrievedDocument]) -> None:
+        self.docs = docs
+        self.calls: list[tuple[str, int]] = []
+
+    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
+        self.calls.append((query, top_k))
+        return [document.model_copy() for document in self.docs[:top_k]]
+
+
+class _FakeReranker:
+    def rerank(self, query: str, documents: list[RetrievedDocument], top_n: int | None = None) -> list[RetrievedDocument]:
+        ordered = sorted(documents, key=lambda item: float(item.metadata.get("rerank_score", 0.0)), reverse=True)
+        if top_n is not None:
+            ordered = ordered[:top_n]
+        return [document.model_copy(update={"rank": rank}) for rank, document in enumerate(ordered, start=1)]
 
 
 def _build_indexes() -> tuple[PublicIndex, GraphIndex]:
@@ -103,3 +122,47 @@ def test_ours_ch4_pipeline_and_ablation_summary() -> None:
     assert "text_compensation_activated" in records[0].trace
     summary = summarize_ablation(records)
     assert "text_compensation_activation_rate" in summary
+
+
+def test_ours_ch4_pipeline_supports_dense_relation_and_compensation_trace() -> None:
+    samples = load_benchmark_samples(Path("outputs/two_file_demo/benchmark_dataset.jsonl"))
+    sample = next(item for item in samples if item.question_type.value == "explanation")
+    text_index, graph_index = _build_indexes()
+    dense_docs = [
+        RetrievedDocument(
+            source_id=sample.evidence[0].source_id,
+            section_id=sample.evidence[0].section_id,
+            content="dense hit content",
+            score=0.7,
+            rank=1,
+            metadata={"retriever": "qdrant_dense", "dense_score": 0.7, "rerank_score": 0.9},
+        ),
+        RetrievedDocument(
+            source_id="doc_other",
+            section_id="sec_other",
+            content="other hit",
+            score=0.4,
+            rank=2,
+            metadata={"retriever": "qdrant_dense", "dense_score": 0.4, "rerank_score": 0.5},
+        ),
+    ]
+    fake_retriever = _FakeRetriever(dense_docs)
+    pipeline = OursCh4Pipeline(
+        text_index,
+        SkeletonExtractor(graph_index),
+        RelationDrivenRetriever(text_index, graph_index, text_retriever=fake_retriever),
+        TextCompensator(text_index, graph_index, text_retriever=fake_retriever),
+        config=OursCh4Config(top_k=2, skeleton_mode="oracle", rerank=True, retrieval_mode="dense"),
+        reranker=_FakeReranker(),
+    )
+
+    record = pipeline.run(sample)
+
+    assert record.trace["retrieval_mode"] == "dense"
+    assert "initial_dense_candidates" in record.trace
+    assert "final_reranked_candidates" in record.trace
+    assert "dense_scores" in record.trace["relation_driven_details"]
+    assert "relation_scores" in record.trace["relation_driven_details"]
+    assert "constraint_scores" in record.trace["relation_driven_details"]
+    assert "backfill_scores" in record.trace["text_compensation_details"]
+    assert "rerank_scores" in record.trace

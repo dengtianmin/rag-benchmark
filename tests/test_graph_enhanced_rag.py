@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.schema import RetrievedDocument
 from dataio.loaders import load_benchmark_samples, load_graph_section_records
 from modules.graph_expander import GraphExpander, GraphIndex
 from modules.graph_organizer import GraphOrganizer
@@ -13,6 +14,24 @@ from pipelines.graph_enhanced_rag import (
     summarize_graph_retrieval,
 )
 from retrievers.graph_retriever import GraphRetriever
+
+
+class _FakeSeedRetriever:
+    def __init__(self, docs: list[RetrievedDocument]) -> None:
+        self.docs = docs
+        self.calls: list[tuple[str, int]] = []
+
+    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
+        self.calls.append((query, top_k))
+        return self.docs[:top_k]
+
+
+class _FakeReranker:
+    def rerank(self, query: str, documents: list[RetrievedDocument], top_n: int | None = None) -> list[RetrievedDocument]:
+        ordered = sorted(documents, key=lambda item: float(item.metadata.get("rerank_score", 0.0)), reverse=True)
+        if top_n is not None:
+            ordered = ordered[:top_n]
+        return [document.model_copy(update={"rank": rank}) for rank, document in enumerate(ordered, start=1)]
 
 
 def test_load_graph_section_records_parses_relations() -> None:
@@ -102,3 +121,42 @@ def test_summarize_graph_retrieval_returns_expected_keys() -> None:
     records = [pipeline.run(sample) for sample in samples[:3]]
     summary = summarize_graph_retrieval(records)
     assert set(summary) == {"expanded_count", "seed_hit_rate", "post_expand_hit_rate"}
+
+
+def test_graph_enhanced_rag_pipeline_supports_dense_seed_and_rerank_trace() -> None:
+    samples = load_benchmark_samples(Path("outputs/two_file_demo/benchmark_dataset.jsonl"))
+    sample = samples[0]
+    text_index = PublicIndex.from_markdown_sections(Path("artifacts/two_file_demo/markdown_sections.jsonl"))
+    graph_index = GraphIndex.build(load_graph_section_records(Path("artifacts/two_file_demo/knowledge_extraction.jsonl")))
+    dense_seed_docs = [
+        RetrievedDocument(
+            source_id=sample.evidence[0].source_id,
+            section_id=sample.evidence[0].section_id,
+            content="dense seed",
+            score=0.82,
+            rank=1,
+            metadata={"retriever": "qdrant_dense", "dense_score": 0.82, "rerank_score": 0.9},
+        )
+    ]
+    retriever = GraphRetriever(
+        text_index=text_index,
+        graph_index=graph_index,
+        seed_retriever=_FakeSeedRetriever(dense_seed_docs),
+        config=build_graph_retriever_config(
+            GraphEnhancedRAGConfig(seed_top_k=1, expand_k=1, final_top_k=1, rerank=True, retrieval_mode="dense")
+        ),
+    )
+    pipeline = GraphEnhancedRAGPipeline(
+        retriever,
+        config=GraphEnhancedRAGConfig(seed_top_k=1, expand_k=1, final_top_k=1, rerank=True, retrieval_mode="dense"),
+        reranker=_FakeReranker(),
+    )
+
+    record = pipeline.run(sample)
+
+    assert record.trace["retrieval_mode"] == "dense"
+    assert "initial_dense_candidates" in record.trace
+    assert "final_reranked_candidates" in record.trace
+    assert sample.evidence[0].section_id in record.trace["seed_dense_recall_scores"]
+    assert "pre_rerank_sections" in record.trace
+    assert "rerank_scores" in record.trace

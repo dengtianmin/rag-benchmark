@@ -20,8 +20,48 @@ from evaluation.retrieval_metrics import (
     recall_at_k,
     reciprocal_rank,
 )
-from pipelines.base import PublicIndex
+from pipelines.base import NO_RETRIEVAL_ANSWER, PublicIndex, SectionDocument
 from pipelines.traditional_rag import TraditionalRAGConfig, TraditionalRAGPipeline
+from rerankers.tei_reranker import TEIReranker
+
+
+class _FakeRetriever:
+    def __init__(self, docs: list[RetrievedDocument]) -> None:
+        self.docs = docs
+        self.calls: list[tuple[str, int]] = []
+
+    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
+        self.calls.append((query, top_k))
+        return self.docs[:top_k]
+
+
+class _FakeReranker:
+    def rerank(self, query: str, documents: list[RetrievedDocument], top_n: int | None = None) -> list[RetrievedDocument]:
+        ordered = sorted(documents, key=lambda item: float(item.metadata.get("rerank_score", 0.0)), reverse=True)
+        if top_n is not None:
+            ordered = ordered[:top_n]
+        return [document.model_copy(update={"rank": rank}) for rank, document in enumerate(ordered, start=1)]
+
+
+class _FakeResponse:
+    def __init__(self, payload: list[dict], status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.ok = status_code == 200
+        self.text = str(payload)
+
+    def json(self) -> list[dict]:
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self.responses = responses
+        self.calls: list[dict] = []
+
+    def post(self, url: str, *, json: dict, headers: dict, timeout: float) -> _FakeResponse:
+        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return self.responses.pop(0)
 
 
 def _build_record(
@@ -140,3 +180,122 @@ def test_traditional_rag_pipeline_runs_on_demo_subset() -> None:
     assert output["qid"] == samples[0].question_id
     assert isinstance(output["retrieved_doc_ids"], list)
     assert isinstance(output["retrieved_section_ids"], list)
+
+
+def test_traditional_rag_pipeline_returns_fallback_answer_when_no_document_is_retrieved() -> None:
+    sample = BenchmarkSample(
+        question_id="qa_no_hit",
+        question="完全不存在的查询词",
+        answer_short="标准答案",
+        question_type="fact",
+        source_scope="single_section",
+        evidence=[EvidenceItem(source_id="doc_1", section_id="sec_1", quote="标准答案")],
+        source_id="doc_1",
+        section_id="sec_1",
+    )
+    index = PublicIndex(
+        [
+            SectionDocument(
+                source_id="doc_1",
+                section_id="sec_1",
+                content="这里没有任何相关词汇",
+                doc_title="示例文档",
+                section_path=["示例章节"],
+            )
+        ]
+    )
+    pipeline = TraditionalRAGPipeline(index=index, config=TraditionalRAGConfig(top_k=3, rerank=True))
+
+    record = pipeline.run(sample)
+
+    assert record.retrieval.retrieved_documents == []
+    assert record.answer.answer_text == NO_RETRIEVAL_ANSWER
+    assert record.answer.supporting_evidence == []
+    assert record.answer.metadata["no_retrieval"] is True
+
+
+def test_traditional_rag_pipeline_supports_dense_retrieval_trace_and_rerank() -> None:
+    sample = BenchmarkSample(
+        question_id="qa_dense",
+        question="数据库加密支持哪些能力？",
+        answer_short="数据库加密与访问控制",
+        question_type="fact",
+        source_scope="single_section",
+        evidence=[EvidenceItem(source_id="doc_1", section_id="sec_1", quote="数据库加密")],
+        source_id="doc_1",
+        section_id="sec_1",
+    )
+    index = PublicIndex([])
+    docs = [
+        RetrievedDocument(
+            source_id="doc_1",
+            section_id="sec_1",
+            content="支持数据库加密与访问控制。",
+            score=0.81,
+            rank=1,
+            metadata={"retriever": "qdrant_dense", "dense_score": 0.81, "rerank_score": 0.95},
+        ),
+        RetrievedDocument(
+            source_id="doc_2",
+            section_id="sec_2",
+            content="提供统一日志审计能力。",
+            score=0.85,
+            rank=2,
+            metadata={"retriever": "qdrant_dense", "dense_score": 0.85, "rerank_score": 0.60},
+        ),
+    ]
+    retriever = _FakeRetriever(docs)
+    pipeline = TraditionalRAGPipeline(
+        index=index,
+        retriever=retriever,
+        reranker=_FakeReranker(),
+        config=TraditionalRAGConfig(top_k=2, rerank=True, retrieval_mode="dense"),
+    )
+
+    record = pipeline.run(sample)
+
+    assert retriever.calls == [(sample.question, 2)]
+    assert record.trace["retrieval_mode"] == "dense"
+    assert "initial_dense_candidates" in record.trace
+    assert "final_reranked_candidates" in record.trace
+    assert record.trace["dense_recall_scores"] == {"sec_1": 0.81, "sec_2": 0.85}
+    assert record.trace["rerank_scores"] == {"sec_1": 0.95, "sec_2": 0.6}
+    assert record.trace["final_kept_sections"] == ["sec_1", "sec_2"]
+
+
+def test_traditional_rag_pipeline_uses_tei_reranker_and_records_trace() -> None:
+    sample = BenchmarkSample(
+        question_id="qa_tei",
+        question="数据库加密支持哪些能力？",
+        answer_short="数据库加密与访问控制",
+        question_type="fact",
+        source_scope="single_section",
+        evidence=[EvidenceItem(source_id="doc_1", section_id="sec_1", quote="数据库加密")],
+        source_id="doc_1",
+        section_id="sec_1",
+    )
+    docs = [
+        RetrievedDocument(source_id="doc_1", section_id="sec_1", content="支持数据库加密与访问控制。", score=0.81, rank=1),
+        RetrievedDocument(source_id="doc_2", section_id="sec_2", content="提供统一日志审计能力。", score=0.85, rank=2),
+    ]
+    retriever = _FakeRetriever(docs)
+    session = _FakeSession([_FakeResponse([{"index": 1, "score": 0.2}, {"index": 0, "score": 0.9}])])
+    reranker = TEIReranker(base_url="http://127.0.0.1:8080", timeout=5, top_n=1, session=session)
+    pipeline = TraditionalRAGPipeline(
+        index=PublicIndex([]),
+        retriever=retriever,
+        reranker=reranker,
+        config=TraditionalRAGConfig(top_k=2, rerank=True, rerank_top_n=1, retrieval_mode="dense"),
+    )
+
+    record = pipeline.run(sample)
+
+    assert retriever.calls == [(sample.question, 2)]
+    assert len(session.calls) == 1
+    assert session.calls[0]["url"] == "http://127.0.0.1:8080/rerank"
+    assert record.trace["rerank_backend"] == "tei"
+    assert record.trace["rerank_url"] == "http://127.0.0.1:8080"
+    assert record.trace["rerank_input_count"] == 2
+    assert record.trace["rerank_top_n"] == 1
+    assert record.trace["final_reranked_candidates"] == ["sec_1"]
+    assert record.trace["rerank_scores"] == {"sec_1": 0.9}

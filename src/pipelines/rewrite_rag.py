@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from core.schema import BenchmarkSample, PipelineRunRecord, RetrievedDocument
 from modules.query_rewriter import QueryRewriter, RewriteMode
 from pipelines.base import BasePipeline, MockGenerator, MockReranker, PublicIndex
+from retrievers.text_retriever import LexicalTextRetriever, SupportsRetrieve
 
 
 @dataclass(slots=True)
 class RewriteRAGConfig:
     top_k: int = 5
     rerank: bool = True
+    rerank_top_n: int | None = None
     mode: RewriteMode = "naive"
+    retrieval_mode: str = "lexical"
+    trace_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def compare_retrievals(
@@ -69,25 +74,73 @@ class RewriteRAGPipeline(BasePipeline):
         *,
         config: RewriteRAGConfig | None = None,
         rewriter: QueryRewriter | None = None,
-        reranker: MockReranker | None = None,
+        retriever: SupportsRetrieve | None = None,
+        reranker: Any | None = None,
         generator: MockGenerator | None = None,
     ) -> None:
         self.index = index
         self.config = config or RewriteRAGConfig()
         self.rewriter = rewriter or QueryRewriter()
+        self.retriever = retriever or LexicalTextRetriever(index)
         self.reranker = reranker or MockReranker()
         self.generator = generator or MockGenerator()
 
     def run(self, sample: BenchmarkSample) -> PipelineRunRecord:
         original_query = sample.question
         rewrite_output = self.rewriter.rewrite(original_query, sample=sample, mode=self.config.mode)
-        original_documents = self.index.search(original_query, top_k=self.config.top_k)
-        rewritten_documents = self.index.search(rewrite_output.rewritten_query, top_k=self.config.top_k)
+        original_documents = self.retriever.retrieve(original_query, top_k=self.config.top_k)
+        rewritten_documents = self.retriever.retrieve(rewrite_output.rewritten_query, top_k=self.config.top_k)
+        initial_dense_candidates = {
+            "original": [document.section_id for document in original_documents],
+            "rewritten": [document.section_id for document in rewritten_documents],
+        }
+        original_dense_recall_scores = {
+            document.section_id: float(document.metadata.get("dense_score", document.score))
+            for document in original_documents
+            if document.metadata.get("retriever") in {"qdrant_dense", "hybrid_retriever"}
+        }
+        rewritten_dense_recall_scores = {
+            document.section_id: float(document.metadata.get("dense_score", document.score))
+            for document in rewritten_documents
+            if document.metadata.get("retriever") in {"qdrant_dense", "hybrid_retriever"}
+        }
+        original_pre_rerank_documents = [document.model_copy() for document in original_documents]
+        rewritten_pre_rerank_documents = [document.model_copy() for document in rewritten_documents]
         if self.config.rerank:
             if original_documents:
-                original_documents = self.reranker.rerank(original_query, original_documents)
+                original_documents = self.reranker.rerank(
+                    original_query,
+                    original_documents,
+                    top_n=self.config.rerank_top_n,
+                )
             if rewritten_documents:
-                rewritten_documents = self.reranker.rerank(rewrite_output.rewritten_query, rewritten_documents)
+                rewritten_documents = self.reranker.rerank(
+                    rewrite_output.rewritten_query,
+                    rewritten_documents,
+                    top_n=self.config.rerank_top_n,
+                )
+        original_rerank_scores = {
+            document.section_id: float(document.metadata.get("rerank_score"))
+            for document in original_documents
+            if "rerank_score" in document.metadata
+        }
+        rewritten_rerank_scores = {
+            document.section_id: float(document.metadata.get("rerank_score"))
+            for document in rewritten_documents
+            if "rerank_score" in document.metadata
+        }
+        original_rerank_trace = self.build_rerank_trace(
+            reranker=self.reranker if self.config.rerank else None,
+            before_documents=original_pre_rerank_documents,
+            after_documents=original_documents,
+            top_n=self.config.rerank_top_n,
+        )
+        rewritten_rerank_trace = self.build_rerank_trace(
+            reranker=self.reranker if self.config.rerank else None,
+            before_documents=rewritten_pre_rerank_documents,
+            after_documents=rewritten_documents,
+            top_n=self.config.rerank_top_n,
+        )
         retrieval_result = self.build_retrieval_result(
             sample.question_id, rewrite_output.rewritten_query, rewritten_documents
         )
@@ -110,10 +163,37 @@ class RewriteRAGPipeline(BasePipeline):
                 "rewrite_mode": self.config.mode,
                 "rewrite_details": rewrite_output.details,
                 "top_k": self.config.top_k,
+                "retrieval_mode": self.config.retrieval_mode,
+                "use_rerank": self.config.rerank,
+                **self.config.trace_metadata,
                 "rerank_enabled": self.config.rerank,
                 "original_query": original_query,
+                "initial_dense_candidates": initial_dense_candidates,
+                "original_dense_recall_scores": original_dense_recall_scores,
+                "rewritten_dense_recall_scores": rewritten_dense_recall_scores,
+                "rerank_backend": rewritten_rerank_trace["rerank_backend"],
+                "rerank_url": rewritten_rerank_trace["rerank_url"],
+                "rerank_top_n": rewritten_rerank_trace["rerank_top_n"],
+                "original_rerank_input_count": original_rerank_trace["rerank_input_count"],
+                "rewritten_rerank_input_count": rewritten_rerank_trace["rerank_input_count"],
+                "original_pre_rerank_sections": original_rerank_trace["pre_rerank_sections"],
+                "rewritten_pre_rerank_sections": rewritten_rerank_trace["pre_rerank_sections"],
+                "original_post_rerank_sections": original_rerank_trace["post_rerank_sections"],
+                "rewritten_post_rerank_sections": rewritten_rerank_trace["post_rerank_sections"],
+                "original_rerank_score_list": original_rerank_trace["rerank_score_list"],
+                "rewritten_rerank_score_list": rewritten_rerank_trace["rerank_score_list"],
+                "original_rerank_order_changed": original_rerank_trace["rerank_order_changed"],
+                "rewritten_rerank_order_changed": rewritten_rerank_trace["rerank_order_changed"],
+                "rerank_fallback_used": bool(
+                    original_rerank_trace["rerank_fallback_used"] or rewritten_rerank_trace["rerank_fallback_used"]
+                ),
+                "rerank_error": rewritten_rerank_trace["rerank_error"] or original_rerank_trace["rerank_error"],
+                "original_rerank_scores": original_rerank_scores,
+                "rewritten_rerank_scores": rewritten_rerank_scores,
                 "retrieved_doc_ids": [doc.source_id for doc in rewritten_documents],
                 "retrieved_section_ids": [doc.section_id for doc in rewritten_documents],
+                "final_reranked_candidates": [doc.section_id for doc in rewritten_documents],
+                "final_kept_sections": [doc.section_id for doc in rewritten_documents],
                 "retrieval_comparison": comparison,
                 "generator_metadata": answer_result.metadata,
             },

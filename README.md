@@ -54,6 +54,19 @@ DEEPSEEK_MODEL=deepseek-chat
 
 默认从环境变量读取，也可以修改 `config/default_config.json` 中的工程参数。
 
+如果你要启用本地 Docker TEI rerank，至少补充这些变量：
+
+```bash
+USE_RERANK=true
+RERANK_BACKEND=tei
+TEI_RERANK_URL=http://127.0.0.1:8080
+TEI_RERANK_TIMEOUT=30
+TEI_RERANK_API_KEY=
+TEI_RERANK_MAX_RETRIES=1
+RERANK_TOP_N=5
+RERANK_ALLOW_MOCK_FALLBACK=false
+```
+
 ## 目录结构
 
 ```text
@@ -107,6 +120,13 @@ DEEPSEEK_MODEL=deepseek-chat
 - [graph_enhanced_rag.py](/home/paper/Benchmark/src/pipelines/graph_enhanced_rag.py)
 - [kbqa_baseline.py](/home/paper/Benchmark/src/pipelines/kbqa_baseline.py)
 - [ours_ch4.py](/home/paper/Benchmark/src/pipelines/ours_ch4.py)
+
+向量检索接入相关文档：
+
+- [integration_plan_vector_stack.md](/home/paper/Benchmark/docs/integration_plan_vector_stack.md)
+- [vector_retrieval_usage.md](/home/paper/Benchmark/docs/vector_retrieval_usage.md)
+- [vector_stack_change_log.md](/home/paper/Benchmark/docs/vector_stack_change_log.md)
+- [tei_reranker_usage.md](/home/paper/Benchmark/docs/tei_reranker_usage.md)
 
 ## 使用命令
 
@@ -166,6 +186,23 @@ pytest tests/test_schema_normalization.py -q
 ## 研究型 Baseline 运行
 
 下面这些脚本都直接使用本项目的 benchmark schema 和本地 `jsonl` 数据，不依赖 `external/` 目录运行。
+
+当前四条主实验链路已经支持统一 reranker backend：
+
+- `mock`
+- `tei`
+
+默认建议使用本地 Docker TEI 服务：
+
+```bash
+export USE_RERANK=true
+export RERANK_BACKEND=tei
+export TEI_RERANK_URL=http://127.0.0.1:8080
+export TEI_RERANK_TIMEOUT=30
+export RERANK_TOP_N=5
+```
+
+如果只想验证小样本，可为所有实验命令补 `--limit 5`。
 
 Traditional RAG:
 

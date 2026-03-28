@@ -13,6 +13,7 @@ from prompts.rag_prompt_builder import RAGPromptBuilder
 
 TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9][A-Za-z0-9_./:-]*")
 SENTENCE_SPLIT_PATTERN = re.compile(r"[。！？!?;\n]+")
+NO_RETRIEVAL_ANSWER = "未检索到相关证据。"
 
 
 def tokenize(text: str) -> list[str]:
@@ -109,11 +110,38 @@ class MockEmbedder:
 class MockReranker:
     """Optional reranker that re-scores retrieved documents with the same lightweight heuristic."""
 
-    def rerank(self, query: str, documents: list[RetrievedDocument]) -> list[RetrievedDocument]:
-        reranked = sorted(documents, key=lambda item: overlap_score(query, item.content), reverse=True)
+    backend_name = "mock"
+    base_url = None
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[RetrievedDocument],
+        top_n: int | None = None,
+    ) -> list[RetrievedDocument]:
+        if top_n is not None and top_n <= 0:
+            raise ValueError("top_n must be positive when provided.")
+        scored_documents = [
+            (document, overlap_score(query, document.content))
+            for document in documents
+        ]
+        reranked = sorted(scored_documents, key=lambda item: item[1], reverse=True)
+        if top_n is not None:
+            reranked = reranked[:top_n]
         return [
-            document.model_copy(update={"rank": rank, "metadata": {**document.metadata, "reranked": True}})
-            for rank, document in enumerate(reranked, start=1)
+            document.model_copy(
+                update={
+                    "rank": rank,
+                    "metadata": {
+                        **document.metadata,
+                        "reranked": True,
+                        "rerank_score": score,
+                        "rank_after_rerank": rank,
+                        "reranker": self.backend_name,
+                    },
+                }
+            )
+            for rank, (document, score) in enumerate(reranked, start=1)
         ]
 
 
@@ -159,7 +187,7 @@ class MockGenerator:
                 }
             ]
         else:
-            answer_text = ""
+            answer_text = NO_RETRIEVAL_ANSWER
             supporting_evidence = []
         return AnswerResult(
             question_id=sample.question_id,
@@ -168,6 +196,7 @@ class MockGenerator:
             supporting_evidence=supporting_evidence,
             metadata={
                 "generator": "mock_generator",
+                "no_retrieval": not documents,
                 "prompt_preview": prompt[:400],
             },
         )
@@ -189,3 +218,57 @@ class BasePipeline:
             retrieved_triples=[],
             debug_info={"retrieved_count": len(documents)},
         )
+
+    @staticmethod
+    def resolve_rerank_backend(reranker: Any | None) -> str:
+        if reranker is None:
+            return "disabled"
+        return str(
+            getattr(
+                reranker,
+                "last_backend_used",
+                getattr(reranker, "backend_name", reranker.__class__.__name__.lower()),
+            )
+        )
+
+    @staticmethod
+    def resolve_rerank_url(reranker: Any | None) -> str | None:
+        if reranker is None:
+            return None
+        base_url = getattr(reranker, "base_url", None)
+        if not base_url and hasattr(reranker, "primary"):
+            base_url = getattr(getattr(reranker, "primary"), "base_url", None)
+        return str(base_url) if base_url else None
+
+    @classmethod
+    def build_rerank_trace(
+        cls,
+        *,
+        reranker: Any | None,
+        before_documents: list[RetrievedDocument],
+        after_documents: list[RetrievedDocument],
+        top_n: int | None,
+    ) -> dict[str, Any]:
+        before_sections = [document.section_id for document in before_documents]
+        after_sections = [document.section_id for document in after_documents]
+        return {
+            "rerank_backend": cls.resolve_rerank_backend(reranker),
+            "rerank_url": cls.resolve_rerank_url(reranker),
+            "rerank_input_count": len(before_documents),
+            "rerank_top_n": top_n,
+            "rerank_fallback_used": bool(
+                reranker is not None and getattr(reranker, "last_error", None) is not None
+            ),
+            "rerank_error": getattr(reranker, "last_error", None) if reranker is not None else None,
+            "rerank_order_changed": before_sections != after_sections,
+            "pre_rerank_sections": before_sections,
+            "post_rerank_sections": after_sections,
+            "rerank_score_list": [
+                {
+                    "section_id": document.section_id,
+                    "score": float(document.metadata.get("rerank_score")),
+                }
+                for document in after_documents
+                if "rerank_score" in document.metadata
+            ],
+        }

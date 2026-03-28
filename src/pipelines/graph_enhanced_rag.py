@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from core.schema import BenchmarkSample, PipelineRunRecord
 from evaluation.retrieval_metrics import hit_at_k
@@ -14,7 +15,10 @@ class GraphEnhancedRAGConfig:
     expand_k: int = 5
     final_top_k: int = 5
     rerank: bool = True
+    rerank_top_n: int | None = None
     use_gold_hints: bool = True
+    retrieval_mode: str = "lexical"
+    trace_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def summarize_graph_retrieval(records: list[PipelineRunRecord]) -> dict[str, float]:
@@ -36,7 +40,7 @@ class GraphEnhancedRAGPipeline(BasePipeline):
         retriever: GraphRetriever,
         *,
         config: GraphEnhancedRAGConfig | None = None,
-        reranker: MockReranker | None = None,
+        reranker: Any | None = None,
         generator: MockGenerator | None = None,
     ) -> None:
         self.retriever = retriever
@@ -47,8 +51,26 @@ class GraphEnhancedRAGPipeline(BasePipeline):
     def run(self, sample: BenchmarkSample) -> PipelineRunRecord:
         retrieve_output = self.retriever.retrieve(sample)
         final_documents = retrieve_output.organized.final_documents
+        initial_dense_candidates = [document.section_id for document in retrieve_output.seed_documents]
+        seed_dense_scores = {
+            document.section_id: float(document.metadata.get("dense_score", document.score))
+            for document in retrieve_output.seed_documents
+            if document.metadata.get("retriever") in {"qdrant_dense", "hybrid_retriever"}
+        }
+        pre_rerank_documents = [document.model_copy() for document in final_documents]
         if self.config.rerank and final_documents:
-            final_documents = self.reranker.rerank(sample.question, final_documents)
+            final_documents = self.reranker.rerank(sample.question, final_documents, top_n=self.config.rerank_top_n)
+        rerank_scores = {
+            document.section_id: float(document.metadata.get("rerank_score"))
+            for document in final_documents
+            if "rerank_score" in document.metadata
+        }
+        rerank_trace = self.build_rerank_trace(
+            reranker=self.reranker if self.config.rerank else None,
+            before_documents=pre_rerank_documents,
+            after_documents=final_documents,
+            top_n=self.config.rerank_top_n,
+        )
         retrieval_result = self.build_retrieval_result(sample.question_id, sample.question, final_documents)
         answer_result = self.generator.generate(sample, final_documents)
 
@@ -84,9 +106,17 @@ class GraphEnhancedRAGPipeline(BasePipeline):
             rewritten_query=None,
             trace={
                 "pipeline": "question -> seed retrieve -> graph-guided expansion -> organize -> rerank -> generate",
+                "retrieval_mode": self.config.retrieval_mode,
+                "use_rerank": self.config.rerank,
+                **self.config.trace_metadata,
                 "seed_sections": [doc.section_id for doc in retrieve_output.seed_documents],
+                "initial_dense_candidates": initial_dense_candidates,
+                "seed_dense_recall_scores": seed_dense_scores,
                 "expanded_sections": [candidate.section_id for candidate in retrieve_output.expanded_candidates],
                 "expansion_reasons": expansion_reasons,
+                **rerank_trace,
+                "rerank_scores": rerank_scores,
+                "final_reranked_candidates": [doc.section_id for doc in final_documents],
                 "final_kept_sections": [doc.section_id for doc in final_documents],
                 "graph_expansion": {
                     "expanded_count": len(retrieve_output.expanded_candidates),

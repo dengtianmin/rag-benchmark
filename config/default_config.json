@@ -35,5 +35,40 @@
   "validation": {
     "support_score_threshold": 0.8,
     "completeness_score_threshold": 0.75
+  },
+  "embedding": {
+    "provider": "zhipuai",
+    "api_key": null,
+    "model": "embedding-3",
+    "dimension": 1024,
+    "batch_size": 32
+  },
+  "retrieval": {
+    "backend": "qdrant",
+    "mode": "lexical",
+    "top_k": 5,
+    "candidate_multiplier": 3,
+    "vector_db_backend": "qdrant",
+    "qdrant_url": "http://127.0.0.1:6333",
+    "qdrant_collection": "benchmark_sections",
+    "qdrant_path": "artifacts/qdrant",
+    "qdrant_use_local": false
+  },
+  "rerank": {
+    "enabled": true,
+    "use_rerank": true,
+    "backend": "tei",
+    "model_path": "/home/paper/Benchmark/models/bge-reranker-v2-m3",
+    "device": "cpu",
+    "use_fp16": false,
+    "query_max_length": 256,
+    "passage_max_length": 512,
+    "tei_url": "http://127.0.0.1:8080",
+    "timeout": 30,
+    "api_key": null,
+    "max_retries": 1,
+    "top_n": 5,
+    "allow_mock_fallback": false
   }
+
 }

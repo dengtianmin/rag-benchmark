@@ -19,6 +19,8 @@ from modules.skeleton_extractor import SkeletonExtractor
 from modules.text_compensator import TextCompensator
 from pipelines.base import PublicIndex
 from pipelines.ours_ch4 import OursCh4Config, OursCh4Pipeline, summarize_ablation
+from retrievers import build_reranker, build_text_retriever
+from runtime_config import build_trace_metadata, load_runtime_settings
 
 
 ABLATIONS = ["full", "w/o_relation_driven", "w/o_skeleton_rewrite", "w/o_text_compensation"]
@@ -38,27 +40,37 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    settings = load_runtime_settings()
     samples = load_benchmark_samples(args.dataset)
     if args.limit is not None:
         samples = samples[: args.limit]
 
     text_index = PublicIndex.from_markdown_sections(args.sections)
+    text_retriever = build_text_retriever(index=text_index, settings=settings)
     graph_index = GraphIndex.build(load_graph_section_records(args.knowledge))
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = []
     for mode in ABLATIONS:
         config = OursCh4Config.from_ablation(mode, top_k=args.top_k, skeleton_mode=args.skeleton_mode)
+        config.retrieval_mode = settings.retrieval.mode
+        config.rerank = settings.rerank.enabled
+        config.rerank_top_n = settings.rerank.top_n
+        config.trace_metadata = build_trace_metadata(settings)
+        reranker = build_reranker(settings) if settings.rerank.enabled else None
         pipeline = OursCh4Pipeline(
             text_index,
             SkeletonExtractor(graph_index),
-            RelationDrivenRetriever(text_index, graph_index),
-            TextCompensator(text_index, graph_index),
+            RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
+            TextCompensator(text_index, graph_index, text_retriever=text_retriever),
             config=config,
+            reranker=reranker,
         )
         records = [pipeline.run(sample) for sample in samples]
         metrics = {
             "mode": mode,
+            "retrieval_mode": settings.retrieval.mode,
+            "use_rerank": settings.rerank.enabled,
             "answer": aggregate_answer_metrics(records),
             "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
             "ours": summarize_ablation(records),
@@ -66,6 +78,8 @@ def main() -> None:
         comparison.append(
             {
                 "mode": mode,
+                "retrieval_mode": settings.retrieval.mode,
+                "use_rerank": settings.rerank.enabled,
                 "em": metrics["answer"]["em"],
                 "token_f1": metrics["answer"]["token_f1"],
                 f"hit@{args.top_k}": metrics["retrieval"][f"hit@{args.top_k}"],

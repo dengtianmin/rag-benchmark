@@ -19,6 +19,8 @@ from modules.skeleton_extractor import SkeletonExtractor
 from modules.text_compensator import TextCompensator
 from pipelines.base import PublicIndex
 from pipelines.ours_ch4 import OursCh4Config, OursCh4Pipeline, summarize_ablation
+from retrievers import build_reranker, build_text_retriever
+from runtime_config import build_trace_metadata, load_runtime_settings
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,18 +38,29 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    settings = load_runtime_settings()
     samples = load_benchmark_samples(args.dataset)
     if args.limit is not None:
         samples = samples[: args.limit]
     text_index = PublicIndex.from_markdown_sections(args.sections)
+    text_retriever = build_text_retriever(index=text_index, settings=settings)
     graph_index = GraphIndex.build(load_graph_section_records(args.knowledge))
-    config = OursCh4Config(top_k=args.top_k, skeleton_mode=args.skeleton_mode, rerank=not args.disable_rerank)
+    config = OursCh4Config(
+        top_k=args.top_k,
+        skeleton_mode=args.skeleton_mode,
+        rerank=(not args.disable_rerank) and settings.rerank.enabled,
+        rerank_top_n=settings.rerank.top_n,
+        retrieval_mode=settings.retrieval.mode,
+        trace_metadata=build_trace_metadata(settings),
+    )
+    reranker = None if args.disable_rerank else build_reranker(settings)
     pipeline = OursCh4Pipeline(
         text_index,
         SkeletonExtractor(graph_index),
-        RelationDrivenRetriever(text_index, graph_index),
-        TextCompensator(text_index, graph_index),
+        RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
+        TextCompensator(text_index, graph_index, text_retriever=text_retriever),
         config=config,
+        reranker=reranker,
     )
     records = [pipeline.run(sample) for sample in samples]
     metrics = {
