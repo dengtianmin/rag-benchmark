@@ -219,6 +219,39 @@ export RERANK_TOP_N=5
 
 如果只想验证小样本，可为所有实验命令补 `--limit 5`。
 
+如果你要对接 Docker Qdrant 并启用样本级并发，建议至少设置：
+
+```bash
+export RETRIEVAL_MODE=dense
+export QDRANT_USE_LOCAL=false
+export QDRANT_URL=http://127.0.0.1:6333
+export QDRANT_COLLECTION=benchmark_sections
+```
+
+首次切到远端 Qdrant 后，需要先重建 collection：
+
+```bash
+python scripts/build_qdrant_index.py \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --manifest-path artifacts/qdrant_index_manifest.remote.json \
+  --recreate
+```
+
+当前 `scripts/run_traditional_rag.py`、`scripts/run_rewrite_rag.py`、`scripts/run_graph_enhanced_rag.py`、
+`scripts/run_ours_ch4.py`、`scripts/run_ablation.py` 和 `scripts/run_all_baselines.py`
+都已支持 `--max-workers`，会对样本做受控并发执行。实现方式是：
+
+- 共享检索器实例，避免重复初始化 Qdrant client
+- 每个 worker 独立创建 generator / reranker / pipeline，避免共享有状态 HTTP client
+
+建议从下面的并发档位逐步压测：
+
+- `--max-workers 4`
+- `--max-workers 8`
+- `--max-workers 16`
+
+如果你用 vLLM 作为 generator，8K 上下文通常偏紧，16K 是更稳妥的起点。遇到超长 prompt 时，仍建议配合降低 `GENERATOR_MAX_TOKENS` 或裁剪检索上下文。
+
 Traditional RAG:
 
 ```bash
@@ -231,6 +264,7 @@ python scripts/run_traditional_rag.py \
   --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \
   --top-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/traditional_rag
 ```
 
@@ -242,6 +276,7 @@ python scripts/run_rewrite_rag.py \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \
   --mode entity_relation \
   --top-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/rewrite_rag
 ```
 
@@ -255,6 +290,7 @@ python scripts/run_graph_enhanced_rag.py \
   --seed-top-k 5 \
   --expand-k 5 \
   --top-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/graph_enhanced_rag
 ```
 

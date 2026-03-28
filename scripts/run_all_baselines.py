@@ -6,8 +6,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from tqdm import tqdm
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -24,6 +22,7 @@ from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.relation_matcher import RelationMatcher
 from modules.skeleton_extractor import SkeletonExtractor
 from modules.text_compensator import TextCompensator
+from parallel_runner import run_samples
 from pipelines.base import PublicIndex
 from pipelines.graph_enhanced_rag import (
     GraphEnhancedRAGConfig,
@@ -56,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted"], default="oracle")
     parser.add_argument("--disable-rerank", action="store_true")
     parser.add_argument("--include-ablation", action="store_true")
+    parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/all_baselines"))
     return parser.parse_args()
 
@@ -105,13 +105,6 @@ def _validate_input_path(path: Path, label: str, *, search_root: Path) -> None:
     raise FileNotFoundError("\n".join(message))
 
 
-def _run_pipeline_with_progress(samples: list[Any], pipeline: Any, description: str) -> list[Any]:
-    records = []
-    for sample in tqdm(samples, desc=description):
-        records.append(pipeline.run(sample))
-    return records
-
-
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -129,10 +122,8 @@ def main() -> None:
     graph_records = load_graph_section_records(args.knowledge)
     graph_index = GraphIndex.build(graph_records)
     rerank_enabled = (not args.disable_rerank) and settings.rerank.enabled
-    text_retriever = build_text_retriever(index=text_index, settings=settings)
-    reranker = None if args.disable_rerank else build_reranker(settings)
-    generator = build_generator(settings)
     trace_metadata = build_trace_metadata(settings)
+    shared_text_retriever = build_text_retriever(index=text_index, settings=settings)
 
     summary: dict[str, Any] = {
         "dataset": str(args.dataset),
@@ -140,27 +131,37 @@ def main() -> None:
         "knowledge": str(args.knowledge),
         "sample_count": len(samples),
         "top_k": args.top_k,
+        "max_workers": args.max_workers,
         "pipelines": {},
     }
 
-    traditional = TraditionalRAGPipeline(
-        index=text_index,
-        retriever=text_retriever,
-        reranker=reranker,
-        generator=generator,
-        config=TraditionalRAGConfig(
-            top_k=args.top_k,
-            rerank=rerank_enabled,
-            rerank_top_n=settings.rerank.top_n,
-            retrieval_mode=settings.retrieval.mode,
-            trace_metadata=trace_metadata,
-        ),
+    def build_traditional_pipeline() -> TraditionalRAGPipeline:
+        return TraditionalRAGPipeline(
+            index=text_index,
+            retriever=shared_text_retriever,
+            reranker=None if args.disable_rerank else build_reranker(settings),
+            generator=build_generator(settings),
+            config=TraditionalRAGConfig(
+                top_k=args.top_k,
+                rerank=rerank_enabled,
+                rerank_top_n=settings.rerank.top_n,
+                retrieval_mode=settings.retrieval.mode,
+                trace_metadata=trace_metadata,
+            ),
+        )
+
+    traditional_records = run_samples(
+        samples,
+        build_pipeline=build_traditional_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Traditional RAG",
+        max_workers=args.max_workers,
     )
-    traditional_records = _run_pipeline_with_progress(samples, traditional, "Traditional RAG")
     traditional_metrics = {
-        "method_name": traditional.method_name,
+        "method_name": TraditionalRAGPipeline.method_name,
         "sample_count": len(traditional_records),
         "top_k": args.top_k,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(traditional_records),
         "retrieval": aggregate_retrieval_metrics(traditional_records, k=args.top_k),
     }
@@ -170,26 +171,35 @@ def main() -> None:
         {"output_dir": str(args.output_dir / "traditional_rag"), **traditional_outputs},
     )
 
-    rewrite = RewriteRAGPipeline(
-        index=text_index,
-        retriever=text_retriever,
-        reranker=reranker,
-        generator=generator,
-        config=RewriteRAGConfig(
-            top_k=args.top_k,
-            rerank=rerank_enabled,
-            rerank_top_n=settings.rerank.top_n,
-            mode=args.rewrite_mode,
-            retrieval_mode=settings.retrieval.mode,
-            trace_metadata=trace_metadata,
-        ),
+    def build_rewrite_pipeline() -> RewriteRAGPipeline:
+        return RewriteRAGPipeline(
+            index=text_index,
+            retriever=shared_text_retriever,
+            reranker=None if args.disable_rerank else build_reranker(settings),
+            generator=build_generator(settings),
+            config=RewriteRAGConfig(
+                top_k=args.top_k,
+                rerank=rerank_enabled,
+                rerank_top_n=settings.rerank.top_n,
+                mode=args.rewrite_mode,
+                retrieval_mode=settings.retrieval.mode,
+                trace_metadata=trace_metadata,
+            ),
+        )
+
+    rewrite_records = run_samples(
+        samples,
+        build_pipeline=build_rewrite_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Rewrite-RAG",
+        max_workers=args.max_workers,
     )
-    rewrite_records = _run_pipeline_with_progress(samples, rewrite, "Rewrite-RAG")
     rewrite_metrics = {
-        "method_name": rewrite.method_name,
+        "method_name": RewriteRAGPipeline.method_name,
         "sample_count": len(rewrite_records),
         "top_k": args.top_k,
         "rewrite_mode": args.rewrite_mode,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(rewrite_records),
         "retrieval": aggregate_retrieval_metrics(rewrite_records, k=args.top_k),
         "rewrite_effect": summarize_rewrite_improvements(rewrite_records),
@@ -205,36 +215,45 @@ def main() -> None:
         },
     )
 
-    graph_config = GraphEnhancedRAGConfig(
-        seed_top_k=args.seed_top_k,
-        expand_k=args.expand_k,
-        final_top_k=args.top_k,
-        rerank=rerank_enabled,
-        rerank_top_n=settings.rerank.top_n,
-        use_gold_hints=args.graph_hint_mode == "gold",
-        retrieval_mode=settings.retrieval.mode,
-        trace_metadata=trace_metadata,
+    def build_graph_pipeline() -> GraphEnhancedRAGPipeline:
+        graph_config = GraphEnhancedRAGConfig(
+            seed_top_k=args.seed_top_k,
+            expand_k=args.expand_k,
+            final_top_k=args.top_k,
+            rerank=rerank_enabled,
+            rerank_top_n=settings.rerank.top_n,
+            use_gold_hints=args.graph_hint_mode == "gold",
+            retrieval_mode=settings.retrieval.mode,
+            trace_metadata=trace_metadata,
+        )
+        graph_retriever = GraphRetriever.from_paths(
+            sections_path=args.sections,
+            knowledge_path=args.knowledge,
+            seed_retriever=shared_text_retriever,
+            config=build_graph_retriever_config(graph_config),
+        )
+        return GraphEnhancedRAGPipeline(
+            graph_retriever,
+            config=graph_config,
+            reranker=None if args.disable_rerank else build_reranker(settings),
+            generator=build_generator(settings),
+        )
+
+    graph_records_out = run_samples(
+        samples,
+        build_pipeline=build_graph_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Graph-enhanced RAG",
+        max_workers=args.max_workers,
     )
-    graph_retriever = GraphRetriever.from_paths(
-        sections_path=args.sections,
-        knowledge_path=args.knowledge,
-        seed_retriever=text_retriever,
-        config=build_graph_retriever_config(graph_config),
-    )
-    graph_pipeline = GraphEnhancedRAGPipeline(
-        graph_retriever,
-        config=graph_config,
-        reranker=reranker,
-        generator=generator,
-    )
-    graph_records_out = _run_pipeline_with_progress(samples, graph_pipeline, "Graph-enhanced RAG")
     graph_metrics = {
-        "method_name": graph_pipeline.method_name,
+        "method_name": GraphEnhancedRAGPipeline.method_name,
         "sample_count": len(graph_records_out),
         "top_k": args.top_k,
         "seed_top_k": args.seed_top_k,
         "expand_k": args.expand_k,
         "hint_mode": args.graph_hint_mode,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(graph_records_out),
         "retrieval": aggregate_retrieval_metrics(graph_records_out, k=args.top_k),
         "graph": summarize_graph_retrieval(graph_records_out),
@@ -250,23 +269,32 @@ def main() -> None:
         },
     )
 
-    kbqa = KBQABaselinePipeline(
-        EntityLinker(graph_index),
-        RelationMatcher(graph_index),
-        KBExecutor(graph_index, text_index),
-        config=KBQABaselineConfig(
-            top_k=args.top_k,
-            entity_mode=args.kbqa_entity_mode,
-            relation_mode=args.kbqa_relation_mode,
-        ),
+    def build_kbqa_pipeline() -> KBQABaselinePipeline:
+        return KBQABaselinePipeline(
+            EntityLinker(graph_index),
+            RelationMatcher(graph_index),
+            KBExecutor(graph_index, text_index),
+            config=KBQABaselineConfig(
+                top_k=args.top_k,
+                entity_mode=args.kbqa_entity_mode,
+                relation_mode=args.kbqa_relation_mode,
+            ),
+        )
+
+    kbqa_records = run_samples(
+        samples,
+        build_pipeline=build_kbqa_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="KBQA baseline",
+        max_workers=args.max_workers,
     )
-    kbqa_records = _run_pipeline_with_progress(samples, kbqa, "KBQA baseline")
     kbqa_metrics = {
-        "method_name": kbqa.method_name,
+        "method_name": KBQABaselinePipeline.method_name,
         "sample_count": len(kbqa_records),
         "top_k": args.top_k,
         "entity_mode": args.kbqa_entity_mode,
         "relation_mode": args.kbqa_relation_mode,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(kbqa_records),
         "retrieval": aggregate_retrieval_metrics(kbqa_records, k=args.top_k),
     }
@@ -281,28 +309,45 @@ def main() -> None:
         },
     )
 
-    ours = OursCh4Pipeline(
-        text_index,
-        SkeletonExtractor(graph_index),
-        RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
-        TextCompensator(text_index, graph_index, text_retriever=text_retriever),
-        reranker=reranker,
-        generator=generator,
-        config=OursCh4Config(
-            top_k=args.top_k,
-            skeleton_mode=args.skeleton_mode,
-            rerank=rerank_enabled,
-            rerank_top_n=settings.rerank.top_n,
-            retrieval_mode=settings.retrieval.mode,
-            trace_metadata=trace_metadata,
-        ),
+    def build_ours_pipeline() -> OursCh4Pipeline:
+        return OursCh4Pipeline(
+            text_index,
+            SkeletonExtractor(graph_index),
+            RelationDrivenRetriever(
+                text_index,
+                graph_index,
+                text_retriever=shared_text_retriever,
+            ),
+            TextCompensator(
+                text_index,
+                graph_index,
+                text_retriever=shared_text_retriever,
+            ),
+            reranker=None if args.disable_rerank else build_reranker(settings),
+            generator=build_generator(settings),
+            config=OursCh4Config(
+                top_k=args.top_k,
+                skeleton_mode=args.skeleton_mode,
+                rerank=rerank_enabled,
+                rerank_top_n=settings.rerank.top_n,
+                retrieval_mode=settings.retrieval.mode,
+                trace_metadata=trace_metadata,
+            ),
+        )
+
+    ours_records = run_samples(
+        samples,
+        build_pipeline=build_ours_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Ours-Ch4",
+        max_workers=args.max_workers,
     )
-    ours_records = _run_pipeline_with_progress(samples, ours, "Ours-Ch4")
     ours_metrics = {
-        "method_name": ours.method_name,
+        "method_name": OursCh4Pipeline.method_name,
         "sample_count": len(ours_records),
         "top_k": args.top_k,
         "skeleton_mode": args.skeleton_mode,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(ours_records),
         "retrieval": aggregate_retrieval_metrics(ours_records, k=args.top_k),
         "ours": summarize_ablation(ours_records),
@@ -331,20 +376,38 @@ def main() -> None:
             config.rerank = rerank_enabled
             config.rerank_top_n = settings.rerank.top_n
             config.trace_metadata = trace_metadata
-            pipeline = OursCh4Pipeline(
-                text_index,
-                SkeletonExtractor(graph_index),
-                RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
-                TextCompensator(text_index, graph_index, text_retriever=text_retriever),
-                config=config,
-                reranker=reranker,
-                generator=generator,
+
+            def build_ablation_pipeline() -> OursCh4Pipeline:
+                return OursCh4Pipeline(
+                    text_index,
+                    SkeletonExtractor(graph_index),
+                    RelationDrivenRetriever(
+                        text_index,
+                        graph_index,
+                        text_retriever=shared_text_retriever,
+                    ),
+                    TextCompensator(
+                        text_index,
+                        graph_index,
+                        text_retriever=shared_text_retriever,
+                    ),
+                    config=config,
+                    reranker=None if args.disable_rerank else build_reranker(settings),
+                    generator=build_generator(settings),
+                )
+
+            records = run_samples(
+                samples,
+                build_pipeline=build_ablation_pipeline,
+                run_sample=lambda pipeline, sample: pipeline.run(sample),
+                description=f"Ablation {mode}",
+                max_workers=args.max_workers,
             )
-            records = _run_pipeline_with_progress(samples, pipeline, f"Ablation {mode}")
             metrics = {
                 "mode": mode,
                 "retrieval_mode": settings.retrieval.mode,
                 "use_rerank": rerank_enabled,
+                "max_workers": args.max_workers,
                 "answer": aggregate_answer_metrics(records),
                 "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
                 "ours": summarize_ablation(records),

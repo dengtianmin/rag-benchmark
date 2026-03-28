@@ -5,8 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-from tqdm import tqdm
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -16,6 +14,7 @@ from dataio.loaders import load_benchmark_samples
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
 from generators import build_generator
+from parallel_runner import run_samples
 from pipelines.base import PublicIndex
 from pipelines.rewrite_rag import RewriteRAGConfig, RewriteRAGPipeline, summarize_rewrite_improvements
 from retrievers import build_reranker, build_text_retriever
@@ -46,6 +45,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory for metrics.json and predictions.jsonl",
     )
     parser.add_argument("--disable-rerank", action="store_true", help="Disable mock reranker.")
+    parser.add_argument("--max-workers", type=int, default=1, help="Number of concurrent sample workers.")
     return parser.parse_args()
 
 
@@ -57,29 +57,39 @@ def main() -> None:
         samples = samples[: args.limit]
 
     index = PublicIndex.from_markdown_sections(args.sections)
-    retriever = build_text_retriever(index=index, settings=settings)
-    reranker = None if args.disable_rerank else build_reranker(settings)
-    generator = build_generator(settings)
-    pipeline = RewriteRAGPipeline(
-        index=index,
-        retriever=retriever,
-        reranker=reranker,
-        generator=generator,
-        config=RewriteRAGConfig(
-            top_k=args.top_k,
-            rerank=(not args.disable_rerank) and settings.rerank.enabled,
-            rerank_top_n=settings.rerank.top_n,
-            mode=args.mode,
-            retrieval_mode=settings.retrieval.mode,
-            trace_metadata=build_trace_metadata(settings),
-        ),
+    shared_retriever = build_text_retriever(index=index, settings=settings)
+
+    def build_pipeline() -> RewriteRAGPipeline:
+        reranker = None if args.disable_rerank else build_reranker(settings)
+        generator = build_generator(settings)
+        return RewriteRAGPipeline(
+            index=index,
+            retriever=shared_retriever,
+            reranker=reranker,
+            generator=generator,
+            config=RewriteRAGConfig(
+                top_k=args.top_k,
+                rerank=(not args.disable_rerank) and settings.rerank.enabled,
+                rerank_top_n=settings.rerank.top_n,
+                mode=args.mode,
+                retrieval_mode=settings.retrieval.mode,
+                trace_metadata=build_trace_metadata(settings),
+            ),
+        )
+
+    records = run_samples(
+        samples,
+        build_pipeline=build_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Rewrite-RAG",
+        max_workers=args.max_workers,
     )
-    records = [pipeline.run(sample) for sample in tqdm(samples, desc="Rewrite-RAG")]
     metrics = {
-        "method_name": pipeline.method_name,
+        "method_name": RewriteRAGPipeline.method_name,
         "rewrite_mode": args.mode,
         "sample_count": len(records),
         "top_k": args.top_k,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(records),
         "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
         "rewrite_effect": summarize_rewrite_improvements(records),

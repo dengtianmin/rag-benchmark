@@ -12,7 +12,7 @@ EMBEDDING_BATCH_SIZE=32
 
 VECTOR_DB_BACKEND=qdrant
 RETRIEVAL_MODE=dense
-QDRANT_USE_LOCAL=true
+QDRANT_USE_LOCAL=false
 QDRANT_PATH=artifacts/qdrant
 QDRANT_COLLECTION=benchmark_sections
 QDRANT_URL=http://127.0.0.1:6333
@@ -31,19 +31,40 @@ RERANKER_PASSAGE_MAX_LENGTH=512
 - `QDRANT_USE_LOCAL=true` 时使用本地持久化模式
 - `QDRANT_USE_LOCAL=false` 时使用远程 `QDRANT_URL`
 - `USE_RERANK=false` 可以关闭本地 BGE 精排
+- 远端 Docker Qdrant 场景下，首次使用前需要先执行一次索引构建，把 section 向量写入远端 collection
 
 ## 2. 索引构建
 
-先构建 Qdrant 索引：
+如果你使用远端 Docker Qdrant，先启动服务：
+
+```bash
+docker run -d \
+  --name qdrant-benchmark \
+  -p 6333:6333 \
+  -p 6334:6334 \
+  qdrant/qdrant
+```
+
+然后构建 Qdrant 索引：
 
 ```bash
 source /home/huang/miniconda3/etc/profile.d/conda.sh
 conda activate paper_benchmark
 
+export QDRANT_USE_LOCAL=false
+export QDRANT_URL=http://127.0.0.1:6333
+
 python scripts/build_qdrant_index.py \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \
-  --manifest-path artifacts/qdrant_index_manifest.json \
+  --manifest-path artifacts/qdrant_index_manifest.remote.json \
   --recreate
+```
+
+如果你仍然想使用本地目录模式，再切回：
+
+```bash
+export QDRANT_USE_LOCAL=true
+export QDRANT_PATH=artifacts/qdrant
 ```
 
 只做读取与统计、不真正写入时：
@@ -92,6 +113,7 @@ python scripts/run_traditional_rag.py \
   --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \
   --top-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/traditional_rag_dense
 ```
 
@@ -103,6 +125,7 @@ python scripts/run_rewrite_rag.py \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \
   --mode entity_relation \
   --top-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/rewrite_rag_dense
 ```
 
@@ -116,6 +139,7 @@ python scripts/run_graph_enhanced_rag.py \
   --top-k 5 \
   --seed-top-k 5 \
   --expand-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/graph_enhanced_rag_dense
 ```
 
@@ -128,6 +152,7 @@ python scripts/run_ours_ch4.py \
   --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
   --top-k 5 \
   --skeleton-mode oracle \
+  --max-workers 4 \
   --output-dir outputs/experiments/ours_ch4_dense
 ```
 
@@ -139,8 +164,30 @@ python scripts/run_ablation.py \
   --sections artifacts/two_file_demo/markdown_sections.jsonl \
   --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
   --top-k 5 \
+  --max-workers 4 \
   --output-dir outputs/experiments/ablation_dense
 ```
+
+统一跑全部 baseline：
+
+```bash
+python scripts/run_all_baselines.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --limit 5 \
+  --top-k 5 \
+  --max-workers 4 \
+  --output-dir outputs/experiments/all_baselines_concurrent
+```
+
+并发实现说明：
+
+- 检索器实例在脚本级共享，避免重复初始化 Qdrant client
+- generator / reranker / pipeline 在线程内独立创建，避免共享有状态 `requests.Session`
+- `max_workers` 默认是 `1`，逐步提升到 `4 / 8 / 16` 更稳妥
+
+如果 generator 走 vLLM，8K 上下文很容易在 `top-k=5` 时被长 section 顶满。16K 是更稳妥的起点，但仍建议配合控制 `GENERATOR_MAX_TOKENS` 或裁剪上下文长度。
 
 ## 5. 推荐验证组合
 

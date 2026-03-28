@@ -5,8 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-from tqdm import tqdm
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -20,6 +18,7 @@ from modules.graph_expander import GraphIndex
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractor
 from modules.text_compensator import TextCompensator
+from parallel_runner import run_samples
 from pipelines.base import PublicIndex
 from pipelines.ours_ch4 import OursCh4Config, OursCh4Pipeline, summarize_ablation
 from retrievers import build_reranker, build_text_retriever
@@ -35,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted"], default="oracle")
     parser.add_argument("--disable-rerank", action="store_true")
+    parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/ours_ch4"))
     return parser.parse_args()
 
@@ -46,33 +46,43 @@ def main() -> None:
     if args.limit is not None:
         samples = samples[: args.limit]
     text_index = PublicIndex.from_markdown_sections(args.sections)
-    text_retriever = build_text_retriever(index=text_index, settings=settings)
     graph_index = GraphIndex.build(load_graph_section_records(args.knowledge))
-    config = OursCh4Config(
-        top_k=args.top_k,
-        skeleton_mode=args.skeleton_mode,
-        rerank=(not args.disable_rerank) and settings.rerank.enabled,
-        rerank_top_n=settings.rerank.top_n,
-        retrieval_mode=settings.retrieval.mode,
-        trace_metadata=build_trace_metadata(settings),
+    shared_text_retriever = build_text_retriever(index=text_index, settings=settings)
+
+    def build_pipeline() -> OursCh4Pipeline:
+        config = OursCh4Config(
+            top_k=args.top_k,
+            skeleton_mode=args.skeleton_mode,
+            rerank=(not args.disable_rerank) and settings.rerank.enabled,
+            rerank_top_n=settings.rerank.top_n,
+            retrieval_mode=settings.retrieval.mode,
+            trace_metadata=build_trace_metadata(settings),
+        )
+        reranker = None if args.disable_rerank else build_reranker(settings)
+        generator = build_generator(settings)
+        return OursCh4Pipeline(
+            text_index,
+            SkeletonExtractor(graph_index),
+            RelationDrivenRetriever(text_index, graph_index, text_retriever=shared_text_retriever),
+            TextCompensator(text_index, graph_index, text_retriever=shared_text_retriever),
+            config=config,
+            reranker=reranker,
+            generator=generator,
+        )
+
+    records = run_samples(
+        samples,
+        build_pipeline=build_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Ours-Ch4",
+        max_workers=args.max_workers,
     )
-    reranker = None if args.disable_rerank else build_reranker(settings)
-    generator = build_generator(settings)
-    pipeline = OursCh4Pipeline(
-        text_index,
-        SkeletonExtractor(graph_index),
-        RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
-        TextCompensator(text_index, graph_index, text_retriever=text_retriever),
-        config=config,
-        reranker=reranker,
-        generator=generator,
-    )
-    records = [pipeline.run(sample) for sample in tqdm(samples, desc="Ours-Ch4")]
     metrics = {
-        "method_name": pipeline.method_name,
+        "method_name": OursCh4Pipeline.method_name,
         "sample_count": len(records),
         "top_k": args.top_k,
         "skeleton_mode": args.skeleton_mode,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(records),
         "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
         "ours": summarize_ablation(records),

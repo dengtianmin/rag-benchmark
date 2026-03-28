@@ -20,6 +20,7 @@ from modules.graph_expander import GraphIndex
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractor
 from modules.text_compensator import TextCompensator
+from parallel_runner import run_samples
 from pipelines.base import PublicIndex
 from pipelines.ours_ch4 import OursCh4Config, OursCh4Pipeline, summarize_ablation
 from retrievers import build_reranker, build_text_retriever
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted"], default="oracle")
+    parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/ablation"))
     return parser.parse_args()
 
@@ -49,9 +51,8 @@ def main() -> None:
         samples = samples[: args.limit]
 
     text_index = PublicIndex.from_markdown_sections(args.sections)
-    text_retriever = build_text_retriever(index=text_index, settings=settings)
     graph_index = GraphIndex.build(load_graph_section_records(args.knowledge))
-    generator = build_generator(settings)
+    shared_text_retriever = build_text_retriever(index=text_index, settings=settings)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = []
@@ -61,21 +62,32 @@ def main() -> None:
         config.rerank = settings.rerank.enabled
         config.rerank_top_n = settings.rerank.top_n
         config.trace_metadata = build_trace_metadata(settings)
-        reranker = build_reranker(settings) if settings.rerank.enabled else None
-        pipeline = OursCh4Pipeline(
-            text_index,
-            SkeletonExtractor(graph_index),
-            RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever),
-            TextCompensator(text_index, graph_index, text_retriever=text_retriever),
-            config=config,
-            reranker=reranker,
-            generator=generator,
+
+        def build_pipeline() -> OursCh4Pipeline:
+            reranker = build_reranker(settings) if settings.rerank.enabled else None
+            generator = build_generator(settings)
+            return OursCh4Pipeline(
+                text_index,
+                SkeletonExtractor(graph_index),
+                RelationDrivenRetriever(text_index, graph_index, text_retriever=shared_text_retriever),
+                TextCompensator(text_index, graph_index, text_retriever=shared_text_retriever),
+                config=config,
+                reranker=reranker,
+                generator=generator,
+            )
+
+        records = run_samples(
+            samples,
+            build_pipeline=build_pipeline,
+            run_sample=lambda pipeline, sample: pipeline.run(sample),
+            description=f"Ablation {mode}",
+            max_workers=args.max_workers,
         )
-        records = [pipeline.run(sample) for sample in tqdm(samples, desc=f"Ablation {mode}", leave=False)]
         metrics = {
             "mode": mode,
             "retrieval_mode": settings.retrieval.mode,
             "use_rerank": settings.rerank.enabled,
+            "max_workers": args.max_workers,
             "answer": aggregate_answer_metrics(records),
             "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
             "ours": summarize_ablation(records),

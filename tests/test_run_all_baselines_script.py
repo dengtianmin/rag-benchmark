@@ -26,6 +26,8 @@ def test_run_all_baselines_script_generates_outputs(tmp_path: Path) -> None:
             "2",
             "--expand-k",
             "2",
+            "--max-workers",
+            "2",
             "--output-dir",
             str(output_dir),
         ],
@@ -40,6 +42,7 @@ def test_run_all_baselines_script_generates_outputs(tmp_path: Path) -> None:
     assert summary_path.exists()
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["sample_count"] == 3
+    assert summary["max_workers"] == 2
 
     expected = {
         "traditional_rag",
@@ -56,6 +59,7 @@ def test_run_all_baselines_script_generates_outputs(tmp_path: Path) -> None:
         assert Path(pipeline_summary["predictions"]).exists()
         metrics = json.loads(Path(pipeline_summary["metrics"]).read_text(encoding="utf-8"))
         assert metrics["sample_count"] == 3
+        assert metrics["max_workers"] == 2
 
 
 def test_run_all_baselines_script_reports_missing_inputs() -> None:

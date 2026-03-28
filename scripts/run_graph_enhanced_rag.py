@@ -5,8 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-from tqdm import tqdm
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -16,6 +14,7 @@ from dataio.loaders import load_benchmark_samples
 from evaluation.answer_metrics import aggregate_answer_metrics
 from evaluation.retrieval_metrics import aggregate_retrieval_metrics
 from generators import build_generator
+from parallel_runner import run_samples
 from pipelines.base import PublicIndex
 from pipelines.graph_enhanced_rag import (
     GraphEnhancedRAGConfig,
@@ -39,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--disable-rerank", action="store_true")
     parser.add_argument("--hint-mode", choices=["gold", "none"], default="gold")
+    parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -54,36 +54,46 @@ def main() -> None:
     if args.limit is not None:
         samples = samples[: args.limit]
 
-    pipeline_config = GraphEnhancedRAGConfig(
-        seed_top_k=args.seed_top_k,
-        expand_k=args.expand_k,
-        final_top_k=args.top_k,
-        rerank=(not args.disable_rerank) and settings.rerank.enabled,
-        rerank_top_n=settings.rerank.top_n,
-        use_gold_hints=args.hint_mode == "gold",
-        retrieval_mode=settings.retrieval.mode,
-        trace_metadata=build_trace_metadata(settings),
-    )
     seed_index = PublicIndex.from_markdown_sections(args.sections)
-    seed_retriever = build_text_retriever(index=seed_index, settings=settings)
-    retriever = GraphRetriever.from_paths(
-        sections_path=args.sections,
-        knowledge_path=args.knowledge,
-        seed_retriever=seed_retriever,
-        config=build_graph_retriever_config(pipeline_config),
+    shared_seed_retriever = build_text_retriever(index=seed_index, settings=settings)
+
+    def build_pipeline() -> GraphEnhancedRAGPipeline:
+        pipeline_config = GraphEnhancedRAGConfig(
+            seed_top_k=args.seed_top_k,
+            expand_k=args.expand_k,
+            final_top_k=args.top_k,
+            rerank=(not args.disable_rerank) and settings.rerank.enabled,
+            rerank_top_n=settings.rerank.top_n,
+            use_gold_hints=args.hint_mode == "gold",
+            retrieval_mode=settings.retrieval.mode,
+            trace_metadata=build_trace_metadata(settings),
+        )
+        retriever = GraphRetriever.from_paths(
+            sections_path=args.sections,
+            knowledge_path=args.knowledge,
+            seed_retriever=shared_seed_retriever,
+            config=build_graph_retriever_config(pipeline_config),
+        )
+        reranker = None if args.disable_rerank else build_reranker(settings)
+        generator = build_generator(settings)
+        return GraphEnhancedRAGPipeline(retriever, config=pipeline_config, reranker=reranker, generator=generator)
+
+    records = run_samples(
+        samples,
+        build_pipeline=build_pipeline,
+        run_sample=lambda pipeline, sample: pipeline.run(sample),
+        description="Graph-enhanced RAG",
+        max_workers=args.max_workers,
     )
-    reranker = None if args.disable_rerank else build_reranker(settings)
-    generator = build_generator(settings)
-    pipeline = GraphEnhancedRAGPipeline(retriever, config=pipeline_config, reranker=reranker, generator=generator)
-    records = [pipeline.run(sample) for sample in tqdm(samples, desc="Graph-enhanced RAG")]
 
     metrics = {
-        "method_name": pipeline.method_name,
+        "method_name": GraphEnhancedRAGPipeline.method_name,
         "sample_count": len(records),
         "top_k": args.top_k,
         "seed_top_k": args.seed_top_k,
         "expand_k": args.expand_k,
         "hint_mode": args.hint_mode,
+        "max_workers": args.max_workers,
         "answer": aggregate_answer_metrics(records),
         "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
         "graph": summarize_graph_retrieval(records),
