@@ -11,6 +11,9 @@ def accuracy(prediction: str, gold_answers: list[str]) -> float:
 
 
 def evaluate_answer_record(record: PipelineRunRecord) -> dict[str, float]:
+    # Design choice: answer metrics are computed only from normalized answer fields.
+    # We intentionally do not evaluate raw JSON output or supporting_evidence text,
+    # so evidence rendering changes do not destabilize EM / Accuracy / Token-F1.
     prediction = record.answer.answer_text or record.answer.answer_short or record.answer.answer_long
     gold_answers = [record.sample.answer_short, record.sample.answer_long]
     primary_gold = record.sample.answer_short or record.sample.answer_long

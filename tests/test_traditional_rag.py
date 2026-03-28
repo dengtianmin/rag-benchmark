@@ -137,6 +137,31 @@ def test_answer_metrics_for_exact_match_case() -> None:
     assert metrics["accuracy"] == 1.0
 
 
+def test_answer_metrics_only_use_answer_text_not_supporting_evidence() -> None:
+    record = _build_record(pred_answer="北京", gold_answer="北京")
+    record.answer.supporting_evidence = [
+        EvidenceItem(source_id="doc_1", section_id="sec_gold", quote='{"answer":"上海","supporting_evidence":[9]}')
+    ]
+
+    metrics = evaluate_answer_record(record)
+
+    assert metrics["em"] == 1.0
+    assert metrics["token_f1"] == 1.0
+    assert metrics["accuracy"] == 1.0
+
+
+def test_answer_metrics_prefer_answer_text_even_if_answer_short_differs() -> None:
+    record = _build_record(pred_answer="北京", gold_answer="北京")
+    record.answer.answer_short = "上海"
+    record.answer.answer_long = "深圳"
+
+    metrics = evaluate_answer_record(record)
+
+    assert metrics["em"] == 1.0
+    assert metrics["token_f1"] == 1.0
+    assert metrics["accuracy"] == 1.0
+
+
 def test_retrieval_metrics_for_hit_case() -> None:
     record = _build_record(retrieved_section_ids=["sec_x", "sec_gold", "sec_y"], gold_section_ids=["sec_gold"])
     assert recall_at_k(record, 2) == 1.0
