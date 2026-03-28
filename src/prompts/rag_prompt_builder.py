@@ -1,20 +1,32 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from core.schema import RetrievedDocument
+
+
+@dataclass(slots=True)
+class NumberedEvidence:
+    index: int
+    text: str
+    document: RetrievedDocument
 
 
 class RAGPromptBuilder:
     """Builds Chinese prompts with numbered evidence snippets."""
 
-    def build_context(self, retrieved_documents: list[RetrievedDocument]) -> str:
-        blocks = []
+    def build_numbered_evidence(self, retrieved_documents: list[RetrievedDocument]) -> list[NumberedEvidence]:
+        numbered: list[NumberedEvidence] = []
         for index, document in enumerate(retrieved_documents, start=1):
             title = str(document.metadata.get("doc_title", "")).strip()
             path = " / ".join(str(item).strip() for item in document.metadata.get("section_path", []) if str(item).strip())
             header_parts = [part for part in [title, path] if part]
             header = f"（{' | '.join(header_parts)}）" if header_parts else ""
-            blocks.append(f"[{index}] {header}\n{document.content}".strip())
-        return "\n\n".join(blocks)
+            numbered.append(NumberedEvidence(index=index, text=f"[{index}] {header}\n{document.content}".strip(), document=document))
+        return numbered
+
+    def build_context(self, retrieved_documents: list[RetrievedDocument]) -> str:
+        return "\n\n".join(item.text for item in self.build_numbered_evidence(retrieved_documents))
 
     def build_prompt(self, *, question: str, retrieved_documents: list[RetrievedDocument]) -> str:
         context = self.build_context(retrieved_documents)

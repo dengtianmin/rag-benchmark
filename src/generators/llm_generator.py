@@ -7,7 +7,7 @@ from typing import Any
 from clients.chat_llm_client import ChatLLMClient, ChatLLMClientError
 from core.schema import AnswerResult, BenchmarkSample, EvidenceItem, RetrievedDocument
 from pipelines.base import MockGenerator
-from prompts.rag_prompt_builder import RAGPromptBuilder
+from prompts.rag_prompt_builder import NumberedEvidence, RAGPromptBuilder
 
 
 JSON_BLOCK_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
@@ -39,6 +39,8 @@ class LLMGenerator:
         if not self.client.enabled:
             return self._fallback(sample, documents, reason="llm_client_not_configured")
 
+        numbered_evidence = self.prompt_builder.build_numbered_evidence(documents)
+        evidence_index_map = self._build_evidence_index_map(numbered_evidence)
         user_prompt = self._build_user_prompt(sample, documents)
         prompt_chars = len(user_prompt)
         try:
@@ -49,7 +51,7 @@ class LLMGenerator:
                 ]
             )
             payload = self._parse_payload(response.content)
-            answer = self._build_answer_result(sample, documents, payload)
+            answer = self._build_answer_result(sample, payload, evidence_index_map)
         except (ChatLLMClientError, ValueError, KeyError, TypeError) as exc:
             return self._fallback(
                 sample,
@@ -60,6 +62,8 @@ class LLMGenerator:
                     "model_name": self.client.model,
                     "base_url": self.client.base_url,
                     "prompt_chars": prompt_chars,
+                    "evidence_index_map": evidence_index_map,
+                    "raw_llm_output": None,
                 },
             )
 
@@ -75,6 +79,8 @@ class LLMGenerator:
                 "fallback_used": False,
                 "fallback_reason": None,
                 "no_retrieval": False,
+                "raw_llm_output": response.content,
+                "evidence_index_map": evidence_index_map,
             }
         )
         return answer
@@ -110,12 +116,12 @@ class LLMGenerator:
     def _build_answer_result(
         self,
         sample: BenchmarkSample,
-        documents: list[RetrievedDocument],
         payload: dict[str, Any],
+        evidence_index_map: dict[int, dict[str, str]],
     ) -> AnswerResult:
         answer_text = str(payload.get("answer", "")).strip() or STANDARD_INSUFFICIENT_ANSWER
-        supporting_indices = self._normalize_indices(payload.get("supporting_evidence", []), len(documents))
-        supporting_evidence = self._build_supporting_evidence(documents, supporting_indices)
+        supporting_indices = self._normalize_indices(payload.get("supporting_evidence", []), len(evidence_index_map))
+        supporting_evidence = self._build_supporting_evidence(evidence_index_map, supporting_indices)
         return AnswerResult(
             question_id=sample.question_id,
             answer_text=answer_text,
@@ -129,20 +135,30 @@ class LLMGenerator:
             },
         )
 
+    def _build_evidence_index_map(self, numbered_evidence: list[NumberedEvidence]) -> dict[int, dict[str, str]]:
+        return {
+            item.index: {
+                "source_id": item.document.source_id,
+                "section_id": item.document.section_id,
+                "quote": item.text,
+            }
+            for item in numbered_evidence
+        }
+
     def _build_supporting_evidence(
         self,
-        documents: list[RetrievedDocument],
+        evidence_index_map: dict[int, dict[str, str]],
         used_indices: Any,
     ) -> list[EvidenceItem]:
-        indices = self._normalize_indices(used_indices, len(documents))
+        indices = self._normalize_indices(used_indices, len(evidence_index_map))
         evidence: list[EvidenceItem] = []
         for index in indices:
-            document = documents[index - 1]
+            mapped = evidence_index_map[index]
             evidence.append(
                 EvidenceItem(
-                    source_id=document.source_id,
-                    section_id=document.section_id,
-                    quote=self._extract_quote(document.content),
+                    source_id=mapped["source_id"],
+                    section_id=mapped["section_id"],
+                    quote=mapped["quote"][: self.evidence_quote_chars],
                 )
             )
         return evidence
@@ -159,13 +175,6 @@ class LLMGenerator:
             if 1 <= index <= limit and index not in normalized:
                 normalized.append(index)
         return normalized
-
-    def _extract_quote(self, content: str) -> str:
-        for sentence in SENTENCE_SPLIT_PATTERN.split(content):
-            sentence = sentence.strip()
-            if sentence:
-                return sentence[: self.evidence_quote_chars]
-        return content[: self.evidence_quote_chars]
 
     def _fallback(
         self,
@@ -194,6 +203,7 @@ class LLMGenerator:
                 "answer": STANDARD_INSUFFICIENT_ANSWER,
                 "supporting_evidence": [],
             },
+            "raw_llm_output": None,
             "selected_evidence_indices": [],
             "no_retrieval": not documents,
         }

@@ -92,6 +92,9 @@ def test_llm_generator_builds_answer_result_from_json() -> None:
     assert result.metadata["generator"] == "llm_generator"
     assert result.metadata["fallback_used"] is False
     assert result.metadata["selected_evidence_indices"] == [1]
+    assert result.metadata["raw_llm_output"] == '{"answer":"北京市朝阳区广顺南大街8号院利星行中心1号楼","supporting_evidence":[1]}'
+    assert result.metadata["evidence_index_map"][1]["section_id"] == "sec1"
+    assert result.supporting_evidence[0].quote.startswith("[1]")
 
 
 def test_llm_generator_falls_back_to_mock_on_invalid_json() -> None:
@@ -106,6 +109,7 @@ def test_llm_generator_falls_back_to_mock_on_invalid_json() -> None:
     assert result.metadata["fallback_reason"] == "LLM returned invalid JSON content."
     assert result.answer_text == STANDARD_INSUFFICIENT_ANSWER
     assert result.supporting_evidence == []
+    assert result.metadata["raw_llm_output"] is None
 
 
 def test_llm_generator_strips_code_fence_and_filters_duplicate_indices() -> None:
@@ -120,6 +124,13 @@ def test_llm_generator_strips_code_fence_and_filters_duplicate_indices() -> None
     assert result.answer_text == "北京市朝阳区广顺南大街8号院利星行中心1号楼"
     assert [item.section_id for item in result.supporting_evidence] == ["sec1"]
     assert result.metadata["selected_evidence_indices"] == [1]
+
+
+def test_mock_generator_keeps_selected_evidence_indices_metadata() -> None:
+    result = MockGenerator().generate(_sample(), _documents())
+
+    assert "selected_evidence_indices" in result.metadata
+    assert result.supporting_evidence
 
 
 def test_rag_prompt_builder_uses_numbered_evidence_in_chinese() -> None:

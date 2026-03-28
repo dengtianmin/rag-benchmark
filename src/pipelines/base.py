@@ -157,6 +157,7 @@ class MockGenerator:
 
     def generate(self, sample: BenchmarkSample, documents: list[RetrievedDocument]) -> AnswerResult:
         prompt = self.prompt_builder.build_prompt(question=sample.question, retrieved_documents=documents)
+        numbered_evidence = self.prompt_builder.build_numbered_evidence(documents)
         sentences: list[tuple[float, str, RetrievedDocument]] = []
         for document in documents:
             for sentence in SENTENCE_SPLIT_PATTERN.split(document.content):
@@ -169,25 +170,34 @@ class MockGenerator:
         top_sentences = sorted(sentences, key=lambda item: item[0], reverse=True)[: self.max_sentences]
         if top_sentences:
             answer_text = "。".join(sentence for _, sentence, _ in top_sentences)
+            selected_indices: list[int] = []
+            for _, _, document in top_sentences:
+                for item in numbered_evidence:
+                    if item.document.section_id == document.section_id and item.index not in selected_indices:
+                        selected_indices.append(item.index)
+                        break
             supporting_evidence = [
                 {
-                    "source_id": document.source_id,
-                    "section_id": document.section_id,
-                    "quote": sentence[:240],
+                    "source_id": item.document.source_id,
+                    "section_id": item.document.section_id,
+                    "quote": item.text[:240],
                 }
-                for _, sentence, document in top_sentences
+                for item in numbered_evidence
+                if item.index in selected_indices
             ]
         elif documents:
             answer_text = documents[0].content[:240]
+            selected_indices = [1]
             supporting_evidence = [
                 {
                     "source_id": documents[0].source_id,
                     "section_id": documents[0].section_id,
-                    "quote": documents[0].content[:240],
+                    "quote": numbered_evidence[0].text[:240],
                 }
             ]
         else:
             answer_text = NO_RETRIEVAL_ANSWER
+            selected_indices = []
             supporting_evidence = []
         return AnswerResult(
             question_id=sample.question_id,
@@ -206,6 +216,7 @@ class MockGenerator:
                 "fallback_reason": None,
                 "no_retrieval": not documents,
                 "prompt_preview": prompt[:400],
+                "selected_evidence_indices": selected_indices,
             },
         )
 
