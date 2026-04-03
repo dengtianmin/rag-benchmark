@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -48,11 +49,41 @@ class SectionDocument:
 
 
 class PublicIndex:
-    """Minimal shared lexical index over markdown sections for baseline pipelines."""
+    """Shared BM25 lexical index over markdown sections for baseline pipelines."""
 
     def __init__(self, documents: list[SectionDocument]) -> None:
         self.documents = documents
         self.by_section_id = {doc.section_id: doc for doc in documents}
+        self._doc_tokens: list[list[str]] = [tokenize(doc.full_text) for doc in documents]
+        self._doc_term_freqs: list[dict[str, int]] = []
+        self._doc_freqs: dict[str, int] = {}
+        self._doc_lengths: list[int] = []
+        self._avg_doc_length = 0.0
+        self._bm25_k1 = 1.5
+        self._bm25_b = 0.75
+        self._build_bm25_index()
+
+    def _build_bm25_index(self) -> None:
+        total_length = 0
+        for tokens in self._doc_tokens:
+            term_freqs: dict[str, int] = {}
+            for token in tokens:
+                term_freqs[token] = term_freqs.get(token, 0) + 1
+            self._doc_term_freqs.append(term_freqs)
+            self._doc_lengths.append(len(tokens))
+            total_length += len(tokens)
+            for token in term_freqs:
+                self._doc_freqs[token] = self._doc_freqs.get(token, 0) + 1
+        if self.documents:
+            self._avg_doc_length = total_length / len(self.documents)
+
+    def _bm25_idf(self, token: str) -> float:
+        doc_freq = self._doc_freqs.get(token, 0)
+        if doc_freq == 0 or not self.documents:
+            return 0.0
+        doc_count = len(self.documents)
+        # Standard BM25 idf with +1 smoothing to keep scores non-negative on common tokens.
+        return math.log(1.0 + (doc_count - doc_freq + 0.5) / (doc_freq + 0.5))
 
     @classmethod
     def from_markdown_sections(cls, path: str | Path) -> "PublicIndex":
@@ -76,8 +107,21 @@ class PublicIndex:
 
     def search(self, query: str, top_k: int) -> list[RetrievedDocument]:
         scored: list[tuple[SectionDocument, float]] = []
-        for rank, document in enumerate(self.documents, start=1):
-            score = overlap_score(query, document.full_text)
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            return []
+
+        unique_query_tokens = set(query_tokens)
+        avg_doc_length = self._avg_doc_length or 1.0
+        for document, term_freqs, doc_length in zip(self.documents, self._doc_term_freqs, self._doc_lengths):
+            score = 0.0
+            norm = self._bm25_k1 * (1.0 - self._bm25_b + self._bm25_b * (doc_length / avg_doc_length))
+            for token in unique_query_tokens:
+                term_freq = term_freqs.get(token, 0)
+                if term_freq <= 0:
+                    continue
+                idf = self._bm25_idf(token)
+                score += idf * (term_freq * (self._bm25_k1 + 1.0)) / (term_freq + norm)
             if score <= 0:
                 continue
             scored.append((document, score))

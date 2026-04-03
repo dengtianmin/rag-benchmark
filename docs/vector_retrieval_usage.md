@@ -28,6 +28,7 @@ RERANKER_PASSAGE_MAX_LENGTH=512
 说明：
 
 - `RETRIEVAL_MODE` 支持 `lexical` / `dense` / `hybrid`
+- 当前 `lexical` 模式使用 BM25 稀疏检索，不再是旧的 overlap heuristic
 - `QDRANT_USE_LOCAL=true` 时使用本地持久化模式
 - `QDRANT_USE_LOCAL=false` 时使用远程 `QDRANT_URL`
 - `USE_RERANK=false` 可以关闭本地 BGE 精排
@@ -205,6 +206,8 @@ USE_RERANK=false
 ```bash
 python scripts/run_traditional_rag.py --output-dir outputs/experiments/traditional_rag_lexical
 ```
+
+这里的 `traditional_rag_lexical` 当前对应的是 BM25 baseline。
 
 再设置：
 

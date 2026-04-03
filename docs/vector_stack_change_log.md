@@ -120,12 +120,19 @@ pip install -r requirements.txt
 已完成：
 
 - 新增 [text_retriever.py](/home/paper/Benchmark/src/retrievers/text_retriever.py)
+- 将 [base.py](/home/paper/Benchmark/src/pipelines/base.py) 中 `PublicIndex.search()` 从简单 token overlap 打分替换为 BM25 lexical retrieval
 
 支持：
 
 - `lexical`
 - `dense`
 - `hybrid`
+
+说明：
+
+- 当前 `lexical` 模式不再是早期的占位式 overlap heuristic，而是基于 `PublicIndex` 内部预计算统计量的 BM25 稀疏检索
+- `LexicalTextRetriever`、`HybridTextRetriever` 的 lexical 半边、以及所有复用 `PublicIndex.search()` 的 pipeline 都会共享这套 BM25 底座
+- 因此该改动不仅影响 `Traditional RAG`，也会同步影响 `Rewrite-RAG`、`Graph-enhanced RAG` 的 seed retrieval，以及 `Ours-Ch4` 中的文本召回 / text compensation
 
 ### 4.7 Pipeline 接入范围
 
@@ -149,6 +156,10 @@ pip install -r requirements.txt
 ### Traditional RAG
 
 - `query -> dense/lexical/hybrid recall -> optional BGE rerank -> generator`
+
+补充：
+
+- 当 `RETRIEVAL_MODE=lexical` 时，当前主线实现使用 BM25 sparse retrieval
 
 ### Rewrite-RAG
 
@@ -177,6 +188,17 @@ pip install -r requirements.txt
 - `use_rerank`
 - `initial_dense_candidates`
 - `final_reranked_candidates`
+
+## 6.1 BM25 相关说明
+
+当前 `src/` 主线中，BM25 只用于 `lexical` 召回底座，不改变：
+
+- dense 检索逻辑
+- Qdrant 向量召回逻辑
+- reranker 行为
+- graph expansion / relation-driven fusion 的上层方法逻辑
+
+它改变的是所有依赖 `PublicIndex.search()` 或 `LexicalTextRetriever` 的文本稀疏召回质量。
 
 ## 7. 当前文档入口
 
