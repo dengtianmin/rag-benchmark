@@ -361,6 +361,7 @@ python scripts/run_ablation.py \
 - `metrics.json`
 
 其中 `run_ablation.py` 会为各变体分别输出结果，并额外生成 `comparison.json`。
+其中 `run_all_baselines.py` 当前只汇总 3 个 baseline：`Traditional RAG`、`Graph-enhanced RAG`、`KBQA baseline`。
 
 ## 测试
 

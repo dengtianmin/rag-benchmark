@@ -182,6 +182,8 @@ python scripts/run_all_baselines.py \
   --output-dir outputs/experiments/all_baselines_concurrent
 ```
 
+当前该脚本只包含 3 个 baseline：`Traditional RAG`、`Graph-enhanced RAG`、`KBQA baseline`。
+
 并发实现说明：
 
 - 检索器实例在脚本级共享，避免重复初始化 Qdrant client

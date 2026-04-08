@@ -46,10 +46,8 @@ def test_run_all_baselines_script_generates_outputs(tmp_path: Path) -> None:
 
     expected = {
         "traditional_rag",
-        "rewrite_rag",
         "graph_enhanced_rag",
         "kbqa_baseline",
-        "ours_ch4",
     }
     assert set(summary["pipelines"]) == expected
 

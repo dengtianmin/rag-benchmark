@@ -512,35 +512,27 @@ python scripts/run_all_baselines.py \
   --top-k 5 \
   --seed-top-k 5 \
   --expand-k 5 \
-  --rewrite-mode entity_relation \
   --graph-hint-mode gold \
   --kbqa-entity-mode gold \
   --kbqa-relation-mode gold \
-  --skeleton-mode oracle \
   --max-workers 4 \
-  --output-dir outputs/experiments/all_baselines_full \
-  --include-ablation
+  --output-dir outputs/experiments/all_baselines_full
 ```
 
 参数说明：
 
 | 参数 | 含义 |
 |---|---|
-| `--rewrite-mode` | Rewrite-RAG 的 rewrite 模式 |
 | `--graph-hint-mode` | Graph-enhanced RAG 的 hint 模式 |
 | `--kbqa-entity-mode` | KBQA 的实体模式 |
 | `--kbqa-relation-mode` | KBQA 的关系模式 |
-| `--skeleton-mode` | Ours-Ch4 的 skeleton 模式 |
-| `--include-ablation` | 是否顺带执行 ours 的 ablation |
 
 输出核心文件：
 
 - `summary.json`
 - `traditional_rag/metrics.json`
-- `rewrite_rag/metrics.json`
 - `graph_enhanced_rag/metrics.json`
 - `kbqa_baseline/metrics.json`
-- `ours_ch4/metrics.json`
 
 ## 9. 运行时环境变量说明
 
