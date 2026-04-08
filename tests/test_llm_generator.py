@@ -6,7 +6,8 @@ from generators import build_generator
 from generators.llm_generator import LLMGenerator, STANDARD_INSUFFICIENT_ANSWER
 from pipelines.base import MockGenerator
 from prompts.rag_prompt_builder import RAGPromptBuilder
-from runtime_config import RuntimeSettings
+import runtime_config as runtime_config_module
+from runtime_config import RuntimeSettings, load_runtime_settings
 
 
 class _FakeResponse:
@@ -71,6 +72,43 @@ def test_build_generator_defaults_to_mock() -> None:
     settings = RuntimeSettings()
     generator = build_generator(settings)
     assert isinstance(generator, MockGenerator)
+
+
+def test_build_generator_accepts_dashscope_backend() -> None:
+    settings = RuntimeSettings.model_validate(
+        {
+            "generator": {
+                "backend": "dashscope",
+                "provider": "dashscope",
+                "api_key": "dashscope-key",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "model": "qwen2.5-7b-instruct-1m",
+            }
+        }
+    )
+
+    generator = build_generator(settings)
+
+    assert isinstance(generator, LLMGenerator)
+
+
+def test_load_runtime_settings_falls_back_to_dashscope_generator_env_vars(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_config_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("GENERATOR_BACKEND", "llm")
+    monkeypatch.setenv("GENERATOR_PROVIDER", "dashscope")
+    monkeypatch.delenv("GENERATOR_API_KEY", raising=False)
+    monkeypatch.delenv("GENERATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("GENERATOR_MODEL", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "qwen2.5-7b-instruct-1m")
+
+    settings = load_runtime_settings(config_path="config/default_config.json")
+
+    assert settings.generator.provider == "dashscope"
+    assert settings.generator.api_key == "dashscope-key"
+    assert settings.generator.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert settings.generator.model == "qwen2.5-7b-instruct-1m"
 
 
 def test_llm_generator_builds_answer_result_from_json() -> None:

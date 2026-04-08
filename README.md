@@ -54,6 +54,17 @@ DEEPSEEK_MODEL=deepseek-chat
 
 默认从环境变量读取，也可以修改 `config/default_config.json` 中的工程参数。
 
+如果你要接入阿里百炼平台上的 Qwen 模型，也可以直接填写：
+
+```bash
+DASHSCOPE_API_KEY=your_dashscope_api_key_here
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen2.5-7b-instruct-1m
+LLM_PROVIDER=dashscope
+```
+
+数据集构建链路会优先读取通用 `LLM_*` 变量；若未设置且 `LLM_PROVIDER=dashscope`，则自动回退到 `DASHSCOPE_*`。
+
 如果你要启用本地 Docker TEI rerank，至少补充这些变量：
 
 ```bash
@@ -81,6 +92,19 @@ GENERATOR_JSON_MODE=true
 ```
 
 未配置 `GENERATOR_API_KEY` / `GENERATOR_MODEL`，或 LLM 调用失败、返回非法 JSON 时，会自动回退到本地 `MockGenerator`。
+
+如果实验宿主要使用百炼 Qwen，可改为：
+
+```bash
+GENERATOR_BACKEND=llm
+GENERATOR_PROVIDER=dashscope
+DASHSCOPE_API_KEY=your_dashscope_api_key_here
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen2.5-7b-instruct-1m
+GENERATOR_JSON_MODE=true
+```
+
+如果同时设置了 `GENERATOR_API_KEY` / `GENERATOR_BASE_URL` / `GENERATOR_MODEL`，它们仍然优先于 `DASHSCOPE_*`。
 
 ## 目录结构
 
@@ -142,6 +166,7 @@ GENERATOR_JSON_MODE=true
 - [vector_retrieval_usage.md](/home/paper/Benchmark/docs/vector_retrieval_usage.md)
 - [vector_stack_change_log.md](/home/paper/Benchmark/docs/vector_stack_change_log.md)
 - [tei_reranker_usage.md](/home/paper/Benchmark/docs/tei_reranker_usage.md)
+- [experiment_runbook.md](/home/paper/Benchmark/docs/experiment_runbook.md)
 
 ## 使用命令
 

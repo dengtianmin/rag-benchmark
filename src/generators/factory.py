@@ -10,7 +10,7 @@ def build_generator(settings: RuntimeSettings) -> MockGenerator | LLMGenerator:
     backend = settings.generator.backend.strip().lower()
     if backend in {"", "mock"}:
         return MockGenerator()
-    if backend not in {"llm", "openai"}:
+    if backend not in {"llm", "openai", "dashscope"}:
         raise ValueError(f"Unsupported generator backend: {settings.generator.backend}")
     client = ChatLLMClient(
         api_key=settings.generator.api_key,

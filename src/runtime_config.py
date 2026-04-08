@@ -92,6 +92,7 @@ class RerankConfig(BaseModel):
 
 class GeneratorConfig(BaseModel):
     backend: str = "mock"
+    provider: str = "openai_compatible"
     api_key: str | None = None
     base_url: str = "https://api.openai.com/v1"
     model: str = ""
@@ -201,13 +202,30 @@ def load_runtime_settings(
     )
 
     generator_raw = dict(raw.get("generator", {}))
+    generator_provider = os.getenv("GENERATOR_PROVIDER", generator_raw.get("provider", "openai_compatible")).strip().lower()
+    dashscope_api_key = os.getenv("DASHSCOPE_API_KEY", generator_raw.get("dashscope_api_key"))
+    dashscope_base_url = os.getenv(
+        "DASHSCOPE_BASE_URL",
+        generator_raw.get("dashscope_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    )
+    dashscope_model = os.getenv("DASHSCOPE_MODEL", generator_raw.get("dashscope_model", "qwen2.5-7b-instruct-1m"))
+    if generator_provider == "dashscope":
+        default_generator_api_key = dashscope_api_key
+        default_generator_base_url = dashscope_base_url
+        default_generator_model = dashscope_model
+    else:
+        default_generator_api_key = generator_raw.get("api_key")
+        default_generator_base_url = generator_raw.get("base_url", "https://api.openai.com/v1")
+        default_generator_model = generator_raw.get("model", "")
+
     generator_raw["backend"] = os.getenv("GENERATOR_BACKEND", generator_raw.get("backend", "mock"))
-    generator_raw["api_key"] = os.getenv("GENERATOR_API_KEY", generator_raw.get("api_key"))
+    generator_raw["provider"] = generator_provider
+    generator_raw["api_key"] = os.getenv("GENERATOR_API_KEY", default_generator_api_key)
     generator_raw["base_url"] = os.getenv(
         "GENERATOR_BASE_URL",
-        generator_raw.get("base_url", "https://api.openai.com/v1"),
+        default_generator_base_url,
     )
-    generator_raw["model"] = os.getenv("GENERATOR_MODEL", generator_raw.get("model", ""))
+    generator_raw["model"] = os.getenv("GENERATOR_MODEL", default_generator_model)
     generator_raw["timeout"] = _env_float("GENERATOR_TIMEOUT", float(generator_raw.get("timeout", 60)))
     generator_raw["max_tokens"] = _env_int("GENERATOR_MAX_TOKENS", int(generator_raw.get("max_tokens", 512)))
     generator_raw["temperature"] = _env_float(

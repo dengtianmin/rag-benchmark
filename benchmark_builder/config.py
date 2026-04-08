@@ -55,7 +55,7 @@ class Settings(BaseModel):
     llm: LLMOptions = Field(default_factory=LLMOptions)
     qa_generation: QAGenerationConfig = Field(default_factory=QAGenerationConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
-    llm_provider: str = "deepseek"
+    llm_provider: str = "openai_compatible"
     llm_api_style: str = "openai"
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.deepseek.com"
@@ -64,6 +64,9 @@ class Settings(BaseModel):
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+    dashscope_api_key: str | None = None
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_model: str = "qwen2.5-7b-instruct-1m"
 
     @model_validator(mode="after")
     def expand_paths(self) -> "Settings":
@@ -94,16 +97,35 @@ def load_settings(config_path: str | Path | None = None, overrides: dict[str, An
     deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", raw.get("deepseek_api_key"))
     deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", raw.get("deepseek_base_url", "https://api.deepseek.com"))
     deepseek_model = os.getenv("DEEPSEEK_MODEL", raw.get("deepseek_model", "deepseek-chat"))
+    dashscope_api_key = os.getenv("DASHSCOPE_API_KEY", raw.get("dashscope_api_key"))
+    dashscope_base_url = os.getenv(
+        "DASHSCOPE_BASE_URL",
+        raw.get("dashscope_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    )
+    dashscope_model = os.getenv("DASHSCOPE_MODEL", raw.get("dashscope_model", "qwen2.5-7b-instruct-1m"))
+    llm_provider = os.getenv("LLM_PROVIDER", raw.get("llm_provider", "openai_compatible")).strip().lower()
 
     raw["deepseek_api_key"] = deepseek_api_key
     raw["deepseek_base_url"] = deepseek_base_url
     raw["deepseek_model"] = deepseek_model
+    raw["dashscope_api_key"] = dashscope_api_key
+    raw["dashscope_base_url"] = dashscope_base_url
+    raw["dashscope_model"] = dashscope_model
 
-    raw["llm_provider"] = os.getenv("LLM_PROVIDER", raw.get("llm_provider", "deepseek"))
+    if llm_provider == "dashscope":
+        default_api_key = dashscope_api_key
+        default_base_url = dashscope_base_url
+        default_model = dashscope_model
+    else:
+        default_api_key = deepseek_api_key
+        default_base_url = deepseek_base_url
+        default_model = deepseek_model
+
+    raw["llm_provider"] = llm_provider
     raw["llm_api_style"] = os.getenv("LLM_API_STYLE", raw.get("llm_api_style", "openai"))
-    raw["llm_api_key"] = os.getenv("LLM_API_KEY", raw.get("llm_api_key", deepseek_api_key))
-    raw["llm_base_url"] = os.getenv("LLM_BASE_URL", raw.get("llm_base_url", deepseek_base_url))
-    raw["llm_model"] = os.getenv("LLM_MODEL", raw.get("llm_model", deepseek_model))
+    raw["llm_api_key"] = os.getenv("LLM_API_KEY", raw.get("llm_api_key", default_api_key))
+    raw["llm_base_url"] = os.getenv("LLM_BASE_URL", raw.get("llm_base_url", default_base_url))
+    raw["llm_model"] = os.getenv("LLM_MODEL", raw.get("llm_model", default_model))
     raw["llm_disable_auth"] = os.getenv(
         "LLM_DISABLE_AUTH",
         str(raw.get("llm_disable_auth", False)),

@@ -60,6 +60,25 @@ def test_load_settings_falls_back_to_deepseek_env_vars(monkeypatch) -> None:
     assert settings.llm_disable_auth is False
 
 
+def test_load_settings_falls_back_to_dashscope_env_vars(monkeypatch) -> None:
+    monkeypatch.setattr(config_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "dashscope")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "qwen2.5-7b-instruct-1m")
+
+    settings = load_settings()
+
+    assert settings.llm_provider == "dashscope"
+    assert settings.llm_api_key == "dashscope-key"
+    assert settings.llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert settings.llm_model == "qwen2.5-7b-instruct-1m"
+    assert settings.dashscope_api_key == "dashscope-key"
+
+
 def test_llm_client_builds_openai_compatible_url_and_headers(monkeypatch) -> None:
     monkeypatch.setenv("LLM_API_KEY", "local-key")
     monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1")
