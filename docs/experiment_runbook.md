@@ -181,6 +181,69 @@ GENERATOR_JSON_MODE=true
 - 路径、并发、是否 dry-run 等，优先由命令行控制
 - 检索、rerank、generator、embedding 等运行时行为，优先由环境变量控制
 
+## 5.1 Retrieval Lab 运行约定
+
+`Retrieval Lab` 是一条独立于 `Ours-Ch4` 主流程的 retrieval-only 实验链路，入口为：
+
+- [run_ours_retrieval_lab.py](/home/paper/Benchmark/scripts/run_ours_retrieval_lab.py)
+
+它的目标是单独评估：
+
+- rewrite 是否真的改善检索
+- rewrite 是否造成语义漂移
+- relation-driven 融合是否带来额外收益
+
+这条链路不运行 generator，也不把 `TextCompensator` 混入主结论。
+
+### 推荐脚本
+
+全量矩阵：
+
+- [run_ours_retrieval_lab_full.sh](/home/paper/Benchmark/scripts/run_ours_retrieval_lab_full.sh)
+
+只跑 `llm` rewrite 相关组合：
+
+- [run_ours_retrieval_lab_llm_only.sh](/home/paper/Benchmark/scripts/run_ours_retrieval_lab_llm_only.sh)
+
+默认 `llm` rewrite 使用：
+
+- `GENERATOR_PROVIDER=dashscope`
+- `GENERATOR_MODEL=qwen2.5-7b-instruct-1m`
+
+### 并发行为
+
+`run_ours_retrieval_lab.py` 当前采用：
+
+- 组合级串行
+- 样本级并发
+
+也就是说，同一个组合内部会按 `--max-workers` 并发处理样本；不同组合之间仍顺序执行。这样做的原因是：
+
+- 输出目录不会互相抢写
+- 组合级日志更容易观察
+- 样本结果仍按原始数据顺序回填，`predictions.jsonl` 顺序稳定
+
+### LLM rewrite 输出约束
+
+`llm` rewrite 当前接受三种返回格式：
+
+- `{"query":"..."}`
+- `"..."`，即顶层 JSON 字符串
+- 双重编码字符串，例如 `"{"query":"..."}"`
+
+解析失败时，错误信息会带一段截断后的 `raw_output` 预览，便于定位是：
+
+- 半截 JSON
+- 顶层字符串
+- 双重编码
+- 其他异常格式
+
+如果你只是在做稳定性验证，建议：
+
+- `LLM_REWRITE_TEMPERATURE=0.0`
+- `LLM_REWRITE_MAX_TOKENS=128` 或更高
+- 从 `LIMIT=100` 开始做小批量压测，再放大全量
+
 ## 6. 数据集构建流程
 
 ### 6.1 全流程命令

@@ -244,6 +244,88 @@ export RERANK_TOP_N=5
 
 如果只想验证小样本，可为所有实验命令补 `--limit 5`。
 
+## Retrieval Lab / Rewrite Diagnosis
+
+这个实验链路用于单独评估两件事：
+
+- 检索是否真的变好了
+- rewrite 是否把问题改坏了
+
+它和 `Ours-Ch4` 主流程不同：
+
+- 只跑 retrieval，不跑 generator
+- 不把最终答案质量混进主结论
+- 不把 `TextCompensator` 混进主实验结论
+- 支持显式比较 `rewrite_mode × retrieval_mode × scorer_mode`
+
+入口脚本：
+
+```bash
+python scripts/run_ours_retrieval_lab.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --limit 2 \
+  --skeleton-mode oracle \
+  --rewrite-modes original,template,rule_based \
+  --retrieval-modes lexical \
+  --scorer-modes plain,relation_driven \
+  --output-dir outputs/experiments/ours_retrieval_lab \
+  --overwrite
+```
+
+如果要跑更完整的矩阵，例如 4 种 rewrite × 3 种 retrieval × 2 种 scorer：
+
+```bash
+python scripts/run_ours_retrieval_lab.py \
+  --dataset outputs/two_file_demo/benchmark_dataset.jsonl \
+  --sections artifacts/two_file_demo/markdown_sections.jsonl \
+  --knowledge artifacts/two_file_demo/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --skeleton-mode oracle \
+  --rewrite-modes original,template,rule_based,llm \
+  --retrieval-modes lexical,dense,hybrid \
+  --scorer-modes plain,relation_driven \
+  --output-dir outputs/experiments/ours_retrieval_lab_full \
+  --overwrite
+```
+
+如果只想跑部分组合，直接缩小这三个参数即可：
+
+- `--rewrite-modes`
+- `--retrieval-modes`
+- `--scorer-modes`
+
+输出目录结构：
+
+```text
+outputs/experiments/ours_retrieval_lab/
+  summary.json
+  comparison.json
+  matrix.csv
+  combos/
+    original__lexical__plain/
+      predictions.jsonl
+      metrics.json
+```
+
+其中：
+
+- `summary.json`：每个组合的聚合指标
+- `comparison.json`：便于横向比较的组合列表
+- `matrix.csv`：适合直接读进 pandas / Excel
+- `predictions.jsonl`：每条样本的 rewrite、skeleton、retrieval 和 diagnosis 明细
+
+新增的 rewrite diagnosis 指标包括：
+
+- `entity_retention_precision / recall`
+- `relation_retention_precision / recall`
+- `constraint_retention_precision / recall`
+- `semantic_drift_rate`
+
+其中 `semantic_drift_rate` 是一个 heuristic proxy：当 rewrite 后把原问题中的关键 entity / relation / constraint 全部丢掉，或 rewrite skeleton 近似为空时，会记为 drift。它不是人工标注 gold。
+
 如果你要对接 Docker Qdrant 并启用样本级并发，建议至少设置：
 
 ```bash
