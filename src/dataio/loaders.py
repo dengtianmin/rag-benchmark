@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
-import orjson
+try:
+    import orjson
+except ImportError:  # pragma: no cover - fallback for minimal environments
+    orjson = None
 
 from core.schema import BenchmarkSample, DatasetBundle, DatasetSplit
 from dataio.normalizers import normalize_benchmark_sample
@@ -38,8 +42,11 @@ def iter_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
             if not raw_line.strip():
                 continue
             try:
-                yield orjson.loads(raw_line)
-            except orjson.JSONDecodeError as exc:
+                if orjson is not None:
+                    yield orjson.loads(raw_line)
+                else:
+                    yield json.loads(raw_line.decode("utf-8"))
+            except (orjson.JSONDecodeError if orjson is not None else json.JSONDecodeError) as exc:
                 raise ValueError(f"Invalid JSONL line at {target}:{line_number}") from exc
 
 

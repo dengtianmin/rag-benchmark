@@ -168,6 +168,10 @@ GENERATOR_JSON_MODE=true
 - [tei_reranker_usage.md](/home/paper/Benchmark/docs/tei_reranker_usage.md)
 - [experiment_runbook.md](/home/paper/Benchmark/docs/experiment_runbook.md)
 
+骨架级离线评测与 `llm_predicted` 说明文档：
+
+- [skeleton_eval.md](/home/paper/Benchmark/docs/skeleton_eval.md)
+
 ## 使用命令
 
 单步执行：

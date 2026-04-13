@@ -30,6 +30,20 @@ from runtime_config import build_trace_metadata, load_runtime_settings
 ABLATIONS = ["full", "w/o_relation_driven", "w/o_skeleton_rewrite", "w/o_text_compensation"]
 
 
+def _build_llm_client(settings):
+    from clients.chat_llm_client import ChatLLMClient
+
+    return ChatLLMClient(
+        api_key=settings.generator.api_key,
+        base_url=settings.generator.base_url,
+        model=settings.generator.model,
+        timeout=settings.generator.timeout,
+        max_tokens=settings.generator.max_tokens,
+        temperature=settings.generator.temperature,
+        json_mode=True,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Ours-Ch4 ablations.")
     parser.add_argument("--dataset", type=Path, default=Path("outputs/two_file_demo/benchmark_dataset.jsonl"))
@@ -37,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--knowledge", type=Path, default=Path("artifacts/two_file_demo/knowledge_extraction.jsonl"))
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted"], default="oracle")
+    parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted", "llm_predicted"], default="oracle")
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/ablation"))
     return parser.parse_args()
@@ -53,6 +67,7 @@ def main() -> None:
     text_index = PublicIndex.from_markdown_sections(args.sections)
     graph_index = GraphIndex.build(load_graph_section_records(args.knowledge))
     shared_text_retriever = build_text_retriever(index=text_index, settings=settings)
+    llm_client = _build_llm_client(settings) if args.skeleton_mode == "llm_predicted" else None
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = []
@@ -68,7 +83,7 @@ def main() -> None:
             generator = build_generator(settings)
             return OursCh4Pipeline(
                 text_index,
-                SkeletonExtractor(graph_index),
+                SkeletonExtractor(graph_index, llm_client=llm_client),
                 RelationDrivenRetriever(text_index, graph_index, text_retriever=shared_text_retriever),
                 TextCompensator(text_index, graph_index, text_retriever=shared_text_retriever),
                 config=config,

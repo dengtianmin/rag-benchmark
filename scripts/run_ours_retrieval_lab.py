@@ -229,9 +229,15 @@ def run_retrieval_lab(
 
     text_index = PublicIndex.from_markdown_sections(sections)
     graph_index = GraphIndex.build(load_graph_section_records(knowledge))
-    skeleton_extractor = SkeletonExtractor(graph_index)
+    skeleton_llm_client = _build_llm_client(llm_rewrite_max_tokens, llm_rewrite_temperature)
+    skeleton_extractor = SkeletonExtractor(
+        graph_index,
+        llm_client=skeleton_llm_client,
+        llm_max_tokens=llm_rewrite_max_tokens,
+        llm_temperature=llm_rewrite_temperature,
+    )
 
-    llm_client = _build_llm_client(llm_rewrite_max_tokens, llm_rewrite_temperature) if "llm" in rewrite_modes else None
+    llm_client = skeleton_llm_client if "llm" in rewrite_modes else None
     query_rewriter = RetrievalLabQueryRewriter(
         llm_client=llm_client,
         llm_max_tokens=llm_rewrite_max_tokens,
@@ -385,7 +391,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-workers", type=int, default=1)
-    parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted"], default="oracle")
+    parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted", "llm_predicted"], default="oracle")
     parser.add_argument("--rewrite-modes", default="original,template,rule_based")
     parser.add_argument("--retrieval-modes", default="lexical")
     parser.add_argument("--scorer-modes", default="plain,relation_driven")
