@@ -26,6 +26,7 @@ from modules.query_rewriters import RetrievalLabQueryRewriter
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.relation_matcher import RelationMatcher
 from modules.skeleton_extractor import SkeletonExtractor
+from modules.text_compensator import TextCompensator
 from parallel_runner import run_samples
 from pipelines.base import BasePipeline, PublicIndex
 from pipelines.graph_enhanced_rag import (
@@ -61,11 +62,13 @@ class OursVariantRunner(BasePipeline):
         query_rewriter: RetrievalLabQueryRewriter,
         text_retriever: Any,
         relation_driven: RelationDrivenRetriever,
+        text_compensator: TextCompensator,
         reranker: Any | None,
         generator: Any,
         top_k: int,
         rerank: bool,
         rerank_top_n: int | None,
+        use_text_compensation: bool,
         rewrite_mode: str,
         retrieval_mode: str,
         scorer_mode: str,
@@ -77,11 +80,13 @@ class OursVariantRunner(BasePipeline):
         self.query_rewriter = query_rewriter
         self.text_retriever = text_retriever
         self.relation_driven = relation_driven
+        self.text_compensator = text_compensator
         self.reranker = reranker
         self.generator = generator
         self.top_k = top_k
         self.rerank = rerank
         self.rerank_top_n = rerank_top_n
+        self.use_text_compensation = use_text_compensation
         self.rewrite_mode = rewrite_mode
         self.retrieval_mode = retrieval_mode
         self.scorer_mode = scorer_mode
@@ -114,9 +119,19 @@ class OursVariantRunner(BasePipeline):
         else:
             raise ValueError(f"Unsupported scorer mode: {self.scorer_mode}")
 
+        compensation = self.text_compensator.compensate(
+            sample,
+            skeleton,
+            documents,
+            top_k=self.top_k,
+            enabled=self.use_text_compensation,
+        )
+        documents = compensation.documents
         pre_rerank_documents = [document.model_copy() for document in documents]
         if self.rerank and documents:
-            documents = self.reranker.rerank(rewritten_query, documents, top_n=self.rerank_top_n)
+            # Keep retrieval on the rewritten query, but rerank against the original question
+            # to stay aligned with the Ours-Ch4 experiment pipeline.
+            documents = self.reranker.rerank(sample.question, documents, top_n=self.rerank_top_n)
         rerank_scores = {
             document.section_id: float(document.metadata.get("rerank_score"))
             for document in documents
@@ -138,7 +153,7 @@ class OursVariantRunner(BasePipeline):
             answer=answer_result,
             rewritten_query=rewritten_query if rewritten_query != sample.question else None,
             trace={
-                "pipeline": "question -> skeleton -> rewrite -> retrieve -> rerank -> generate",
+                "pipeline": "question -> skeleton -> rewrite -> retrieve -> text compensation -> rerank -> generate",
                 "variant": self.name,
                 "rewrite_mode": self.rewrite_mode,
                 "retrieval_mode": self.retrieval_mode,
@@ -150,6 +165,10 @@ class OursVariantRunner(BasePipeline):
                 **self.trace_metadata,
                 "use_rerank": self.rerank,
                 "retrieval_trace": retrieval_trace,
+                "text_compensation_enabled": self.use_text_compensation,
+                "text_compensation_activated": compensation.activated,
+                "text_compensation_reason": compensation.reason,
+                "text_compensation_details": compensation.details,
                 **rerank_trace,
                 "rerank_scores": rerank_scores,
                 "final_reranked_candidates": [document.section_id for document in documents],
@@ -197,6 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ours-main-rerank-rewrite-mode", default="llm")
     parser.add_argument("--ours-main-rerank-retrieval-mode", default="dense")
     parser.add_argument("--ours-main-rerank-scorer-mode", choices=["plain", "relation_driven"], default="relation_driven")
+    parser.add_argument("--ours-use-text-compensation", action="store_true")
     parser.add_argument("--llm-rewrite-max-tokens", type=int, default=640)
     parser.add_argument("--llm-rewrite-temperature", type=float, default=0.0)
     parser.add_argument(
@@ -276,7 +296,15 @@ def _build_summary_entry(metrics: dict[str, Any], extras: dict[str, Any] | None 
     return entry
 
 
-def _ours_metrics(name: str, records: list[PipelineRunRecord], *, top_k: int, max_workers: int, spec: OursVariantSpec) -> dict[str, Any]:
+def _ours_metrics(
+    name: str,
+    records: list[PipelineRunRecord],
+    *,
+    top_k: int,
+    max_workers: int,
+    spec: OursVariantSpec,
+    use_text_compensation: bool,
+) -> dict[str, Any]:
     return {
         "method_name": name,
         "sample_count": len(records),
@@ -290,6 +318,7 @@ def _ours_metrics(name: str, records: list[PipelineRunRecord], *, top_k: int, ma
             "rewrite_mode": spec.rewrite_mode,
             "retrieval_mode": spec.retrieval_mode,
             "scorer_mode": spec.scorer_mode,
+            "use_text_compensation": use_text_compensation,
         },
     }
 
@@ -498,6 +527,11 @@ def main() -> None:
             graph_index,
             text_retriever=variant_text_retriever,
         )
+        variant_text_compensator = TextCompensator(
+            text_index,
+            graph_index,
+            text_retriever=variant_text_retriever,
+        )
 
         def build_ours_variant_pipeline(spec: OursVariantSpec = spec) -> OursVariantRunner:
             return OursVariantRunner(
@@ -506,11 +540,13 @@ def main() -> None:
                 query_rewriter=query_rewriter,
                 text_retriever=variant_text_retriever,
                 relation_driven=variant_relation_driven,
+                text_compensator=variant_text_compensator,
                 reranker=None if args.disable_rerank else build_reranker(variant_settings),
                 generator=build_generator(settings),
                 top_k=args.top_k,
                 rerank=rerank_enabled,
                 rerank_top_n=settings.rerank.top_n,
+                use_text_compensation=args.ours_use_text_compensation,
                 rewrite_mode=spec.rewrite_mode,
                 retrieval_mode=spec.retrieval_mode,
                 scorer_mode=spec.scorer_mode,
@@ -525,7 +561,14 @@ def main() -> None:
             description=spec.name,
             max_workers=args.max_workers,
         )
-        ours_metrics = _ours_metrics(spec.name, ours_records, top_k=args.top_k, max_workers=args.max_workers, spec=spec)
+        ours_metrics = _ours_metrics(
+            spec.name,
+            ours_records,
+            top_k=args.top_k,
+            max_workers=args.max_workers,
+            spec=spec,
+            use_text_compensation=args.ours_use_text_compensation,
+        )
         ours_outputs = _write_outputs(ours_records, ours_metrics, args.output_dir / spec.name)
         summary["pipelines"][spec.name] = _build_summary_entry(
             ours_metrics,
