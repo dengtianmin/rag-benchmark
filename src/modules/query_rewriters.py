@@ -47,6 +47,11 @@ class QueryRewriteResult:
     question_type: str = "fallback_balanced"
     question_type_confidence: str = "low"
     question_type_evidence: dict[str, Any] = field(default_factory=dict)
+    entities: list[str] = field(default_factory=list)
+    relations: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    primary_relation: str | None = None
+    primary_constraint: str | None = None
     must_keep_terms: list[str] = field(default_factory=list)
     sparse_rewrite: str = ""
     dense_rewrite: str = ""
@@ -75,6 +80,14 @@ class QueryRewriteResult:
             "must_keep_terms": list(self.must_keep_terms),
             "sparse_rewrite": self.sparse_rewrite or self.lexical_query,
             "dense_rewrite": self.dense_rewrite or self.dense_query,
+            "question_type": self.question_type,
+            "question_type_confidence": self.question_type_confidence,
+            "question_type_evidence": dict(self.question_type_evidence),
+            "entities": list(self.entities),
+            "relations": list(self.relations),
+            "constraints": list(self.constraints),
+            "primary_relation": self.primary_relation,
+            "primary_constraint": self.primary_constraint,
         }
 
 
@@ -106,6 +119,7 @@ class RetrievalLabQueryRewriter:
         if normalized_mode == "original":
             return self._single_query_result(
                 query=sample.question,
+                skeleton=skeleton,
                 mode=normalized_mode,
                 details={"strategy": "identity", "used_skeleton": False},
                 classification=classification,
@@ -114,6 +128,7 @@ class RetrievalLabQueryRewriter:
             query = self._template_query(sample, skeleton)
             return self._single_query_result(
                 query=query,
+                skeleton=skeleton,
                 mode=normalized_mode,
                 details={"strategy": "deterministic_splicing", "used_skeleton": True},
                 classification=classification,
@@ -122,6 +137,7 @@ class RetrievalLabQueryRewriter:
             query = self._rule_based_query(sample, skeleton)
             return self._single_query_result(
                 query=query,
+                skeleton=skeleton,
                 mode=normalized_mode,
                 details={"strategy": "rule_based", "used_skeleton": True},
                 classification=classification,
@@ -157,6 +173,7 @@ class RetrievalLabQueryRewriter:
         self,
         *,
         query: str,
+        skeleton: SkeletonExtractionResult,
         mode: RewriteMode,
         details: dict[str, Any],
         classification,
@@ -165,6 +182,14 @@ class RetrievalLabQueryRewriter:
         dense_rewrite: str | None = None,
     ) -> QueryRewriteResult:
         normalized_query = query.strip()
+        entities = [item.name for item in skeleton.structured_entities] or list(skeleton.entities)
+        relations = [item.name for item in skeleton.structured_relations] or list(skeleton.relations)
+        constraints = [item.value for item in skeleton.structured_constraints] or list(skeleton.constraints)
+        primary_relation = next(
+            (item.name for item in skeleton.structured_relations if item.role == "target"),
+            relations[0] if relations else None,
+        )
+        primary_constraint = constraints[0] if constraints else None
         return QueryRewriteResult(
             rewritten_query=normalized_query,
             mode=mode,
@@ -179,6 +204,11 @@ class RetrievalLabQueryRewriter:
             question_type=classification.question_type,
             question_type_confidence=classification.question_type_confidence,
             question_type_evidence=classification.question_type_evidence,
+            entities=entities,
+            relations=relations,
+            constraints=constraints,
+            primary_relation=primary_relation,
+            primary_constraint=primary_constraint,
             must_keep_terms=list(must_keep_terms or []),
             sparse_rewrite=(sparse_rewrite or normalized_query).strip(),
             dense_rewrite=(dense_rewrite or normalized_query).strip(),
@@ -320,7 +350,7 @@ class RetrievalLabQueryRewriter:
             )
             return fallback_result
 
-        result = self._result_from_llm_payload(validated_payload, mode=mode, classification=classification)
+        result = self._result_from_llm_payload(validated_payload, skeleton=skeleton, mode=mode, classification=classification)
         result.details.update(
             {
                 "model_name": response.model_name,
@@ -352,6 +382,7 @@ class RetrievalLabQueryRewriter:
                 sparse_rewrite=sparse_query,
                 dense_rewrite=dense_query,
             ),
+            skeleton=skeleton,
             mode=mode,
             strategy="llm_fallback",
             classification=classification,
@@ -361,10 +392,19 @@ class RetrievalLabQueryRewriter:
         self,
         payload: LLMQueryRewritePayload,
         *,
+        skeleton: SkeletonExtractionResult,
         mode: RewriteMode,
         strategy: str = "llm_structured",
         classification,
     ) -> QueryRewriteResult:
+        entities = [item.name for item in skeleton.structured_entities] or list(skeleton.entities)
+        relations = [item.name for item in skeleton.structured_relations] or list(skeleton.relations)
+        constraints = [item.value for item in skeleton.structured_constraints] or list(skeleton.constraints)
+        primary_relation = next(
+            (item.name for item in skeleton.structured_relations if item.role == "target"),
+            relations[0] if relations else None,
+        )
+        primary_constraint = constraints[0] if constraints else None
         if mode == "sparse_llm":
             return QueryRewriteResult(
                 rewritten_query=payload.sparse_rewrite,
@@ -381,6 +421,11 @@ class RetrievalLabQueryRewriter:
                 question_type=classification.question_type,
                 question_type_confidence=classification.question_type_confidence,
                 question_type_evidence=classification.question_type_evidence,
+                entities=entities,
+                relations=relations,
+                constraints=constraints,
+                primary_relation=primary_relation,
+                primary_constraint=primary_constraint,
                 must_keep_terms=payload.must_keep_terms,
                 sparse_rewrite=payload.sparse_rewrite,
                 dense_rewrite=payload.dense_rewrite,
@@ -401,6 +446,11 @@ class RetrievalLabQueryRewriter:
                 question_type=classification.question_type,
                 question_type_confidence=classification.question_type_confidence,
                 question_type_evidence=classification.question_type_evidence,
+                entities=entities,
+                relations=relations,
+                constraints=constraints,
+                primary_relation=primary_relation,
+                primary_constraint=primary_constraint,
                 must_keep_terms=payload.must_keep_terms,
                 sparse_rewrite=payload.sparse_rewrite,
                 dense_rewrite=payload.dense_rewrite,
@@ -421,6 +471,11 @@ class RetrievalLabQueryRewriter:
                 question_type=classification.question_type,
                 question_type_confidence=classification.question_type_confidence,
                 question_type_evidence=classification.question_type_evidence,
+                entities=entities,
+                relations=relations,
+                constraints=constraints,
+                primary_relation=primary_relation,
+                primary_constraint=primary_constraint,
                 must_keep_terms=payload.must_keep_terms,
                 sparse_rewrite=payload.sparse_rewrite,
                 dense_rewrite=payload.dense_rewrite,

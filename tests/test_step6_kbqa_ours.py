@@ -35,8 +35,8 @@ class _FakeReranker:
 
 
 def _build_indexes() -> tuple[PublicIndex, GraphIndex]:
-    text_index = PublicIndex.from_markdown_sections(Path("artifacts/two_file_demo/markdown_sections.jsonl"))
-    graph_index = GraphIndex.build(load_graph_section_records(Path("artifacts/two_file_demo/knowledge_extraction.jsonl")))
+    text_index = PublicIndex.from_markdown_sections(Path("artifacts/full_run/markdown_sections.jsonl"))
+    graph_index = GraphIndex.build(load_graph_section_records(Path("artifacts/full_run/knowledge_extraction.jsonl")))
     return text_index, graph_index
 
 
@@ -101,7 +101,7 @@ def test_text_compensator_activates_for_explanation() -> None:
     text_index, graph_index = _build_indexes()
     skeleton = SkeletonExtractor(graph_index).extract(explanation, mode="oracle")
     base = RelationDrivenRetriever(text_index, graph_index).retrieve(explanation, skeleton, top_k=2)
-    compensation = TextCompensator(text_index, graph_index).compensate(explanation, base.documents, top_k=3, enabled=True)
+    compensation = TextCompensator(text_index, graph_index).compensate(explanation, skeleton, base.documents, top_k=3, enabled=True)
     assert compensation.activated is True
     assert compensation.documents
 

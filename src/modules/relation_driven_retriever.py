@@ -238,6 +238,18 @@ class RelationDrivenRetriever:
                     for section_id in filtered_out
                 },
                 "recovered_section_ids": recovery_ids,
+                "dense_scores": {
+                    section_id: candidate_breakdown[section_id]["semantic_score"]
+                    for section_id in ranked_ids
+                },
+                "relation_scores": {
+                    section_id: candidate_breakdown[section_id]["relation_alignment_score"]
+                    for section_id in ranked_ids
+                },
+                "constraint_scores": {
+                    section_id: candidate_breakdown[section_id]["constraint_satisfaction_score"]
+                    for section_id in ranked_ids
+                },
                 "fusion_weights": {"semantic": self.alpha, "alignment": self.beta, "constraint": self.gamma},
                 "structural_focus": {
                     "anchor_entities": [entity.name for entity in anchor_entities],

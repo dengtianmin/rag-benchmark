@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted", "llm_predicted"], default="oracle")
     parser.add_argument("--disable-rerank", action="store_true")
+    parser.add_argument("--disable-text-compensation", action="store_true")
+    parser.add_argument(
+        "--text-compensation-strategy",
+        choices=["legacy_compensation", "new_compensation"],
+        default="legacy_compensation",
+    )
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/ours_ch4"))
     return parser.parse_args()
@@ -68,6 +74,8 @@ def main() -> None:
         config = OursCh4Config(
             top_k=args.top_k,
             skeleton_mode=args.skeleton_mode,
+            use_text_compensation=not args.disable_text_compensation,
+            text_compensation_strategy=args.text_compensation_strategy,
             rerank=(not args.disable_rerank) and settings.rerank.enabled,
             rerank_top_n=settings.rerank.top_n,
             retrieval_mode=settings.retrieval.mode,
@@ -98,6 +106,8 @@ def main() -> None:
         "top_k": args.top_k,
         "skeleton_mode": args.skeleton_mode,
         "max_workers": args.max_workers,
+        "use_text_compensation": not args.disable_text_compensation,
+        "text_compensation_strategy": args.text_compensation_strategy,
         "answer": aggregate_answer_metrics(records),
         "retrieval": aggregate_retrieval_metrics(records, k=args.top_k),
         "ours": summarize_ablation(records),

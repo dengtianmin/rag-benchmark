@@ -23,68 +23,57 @@ python scripts/run_ours_retrieval_lab.py \
   --overwrite \
   --llm-rewrite-max-tokens 128 
 
-分析 rewrite 在 relation_driven 下的失败原因
-python scripts/run_ours_retrieval_lab.py \
+分析实验结果
+python scripts/analyze_rewrite_failure_modes.py \
+  --input-dir outputs/experiments/ours_rewrite_compare_trace \
+  --output-dir outputs/experiments/ours_rewrite_compare_trace_analysis
+
+
+运行 Ours-Ch4（支持关闭补偿或切换补偿策略）
+python scripts/run_ours_ch4.py \
   --dataset outputs/full_run/benchmark_dataset.jsonl \
   --sections artifacts/full_run/markdown_sections.jsonl \
   --knowledge artifacts/full_run/knowledge_extraction.jsonl \
   --top-k 5 \
   --limit 100 \
   --max-workers 10 \
-  --skeleton-mode oracle \
-  --rewrite-modes original,splicing,sparse_llm,dense_llm,hybrid_llm \
-  --retrieval-modes hybrid \
-  --scorer-modes plain,relation_driven \
-  --output-dir outputs/experiments/ours_rewrite_compare_trace \
-  --overwrite \
-  --llm-rewrite-max-tokens 128 \
-  --llm-rewrite-temperature 0.0
+  --output-dir outputs/experiments/ours_ch4_full_run
 
+关闭文本补偿
+python scripts/run_ours_ch4.py \
+  --dataset outputs/full_run/benchmark_dataset.jsonl \
+  --sections artifacts/full_run/markdown_sections.jsonl \
+  --knowledge artifacts/full_run/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --limit 100 \
+  --max-workers 10 \
+  --disable-text-compensation \
+  --output-dir outputs/experiments/ours_ch4_no_comp
 
-聚合 stage1 / filtering / hybrid branch trace
-python scripts/analyze_rewrite_failure_modes.py \
-  --input-dir outputs/experiments/ours_rewrite_compare_trace \
-  --output-dir outputs/experiments/ours_rewrite_compare_trace_analysis
+使用新式文本补偿
+python scripts/run_ours_ch4.py \
+  --dataset outputs/full_run/benchmark_dataset.jsonl \
+  --sections artifacts/full_run/markdown_sections.jsonl \
+  --knowledge artifacts/full_run/knowledge_extraction.jsonl \
+  --top-k 5 \
+  --limit 100 \
+  --max-workers 10 \
+  --text-compensation-strategy new_compensation \
+  --output-dir outputs/experiments/ours_ch4_new_comp
 
+三组文本补偿对比实验
+python scripts/run_text_compensation_compare.py \
+  --dataset outputs/full_run/benchmark_dataset.jsonl \
+  --sections artifacts/full_run/markdown_sections.jsonl \
+  --knowledge artifacts/full_run/knowledge_extraction.jsonl \
+  --limit 100 \
+  --max-workers 10 \
+  --generator-provider dashscope \
+  --generator-model qwen2.5-7b-instruct-1m \
+  --output-dir outputs/experiments/text_compensation_compare
 
-重点看这些输出
-- outputs/experiments/ours_rewrite_compare_trace/combos/*/predictions.jsonl
-- outputs/experiments/ours_rewrite_compare_trace_analysis/per_combo_analysis.json
-- outputs/experiments/ours_rewrite_compare_trace_analysis/focus_comparisons.json
-- outputs/experiments/ours_rewrite_compare_trace_analysis/report.md
+说明
+- 对比脚本固定使用 `hybrid` 检索与 `relation_driven` 检索器打分。
+- 对比脚本会输出 `no_text_compensation`、`legacy_compensation`、`new_compensation` 三组结果。
+- 生成模型默认强制设置为 `qwen2.5-7b-instruct-1m`，其 API Key 和 Base URL 从 `.env` 读取。
 
-
-抽样查看 dense / sparse / hybrid 在 relation_driven 下的失败样本
-python3 - <<'PY'
-import json
-from collections import defaultdict
-from pathlib import Path
-
-base = Path("outputs/experiments/ours_rewrite_compare_trace/combos")
-combos = [
-    "dense_llm__hybrid__relation_driven",
-    "sparse_llm__hybrid__relation_driven",
-    "hybrid_llm__hybrid__relation_driven",
-]
-out_dir = Path("outputs/experiments/ours_rewrite_compare_trace_analysis/failure_samples")
-out_dir.mkdir(parents=True, exist_ok=True)
-
-for combo in combos:
-    path = base / combo / "predictions.jsonl"
-    rows = [json.loads(line) for line in path.open("r", encoding="utf-8") if line.strip()]
-    failures = [row for row in rows if not row.get("gold_in_final_topk")]
-    buckets = defaultdict(list)
-    for row in failures:
-        buckets[str(row.get("miss_type") or "unknown")].append(row)
-    sampled = []
-    miss_types = sorted(buckets)
-    while len(sampled) < min(20, len(failures)) and any(buckets.values()):
-        for miss_type in miss_types:
-            if buckets[miss_type] and len(sampled) < 20:
-                sampled.append(buckets[miss_type].pop(0))
-    out_path = out_dir / f"{combo}.failure_sample_20.jsonl"
-    with out_path.open("w", encoding="utf-8") as handle:
-        for row in sampled:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(combo, len(sampled), out_path)
-PY

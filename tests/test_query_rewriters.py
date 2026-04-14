@@ -147,6 +147,10 @@ def test_hybrid_llm_query_bundle_routes_by_retrieval_mode() -> None:
     assert isinstance(hybrid_query, TextRetrieverQuery)
     assert hybrid_query.lexical_query == "Alpha 合作原因"
     assert hybrid_query.dense_query == "Alpha 合作原因 的相关说明"
+    structured = result.structured_rewrite()
+    assert structured["question_type"] in {"cause_explanation", "fallback_balanced"}
+    assert structured["entities"]
+    assert structured["relations"]
 
 
 def test_select_llm_rewrite_terms_prefers_structured_anchor_target_and_clips_lengths() -> None:

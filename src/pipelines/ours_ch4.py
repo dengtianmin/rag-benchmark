@@ -5,9 +5,10 @@ from typing import Literal
 from typing import Any
 
 from core.schema import BenchmarkSample, PipelineRunRecord
+from modules.question_type_classifier import QuestionTypeClassifier
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractor
-from modules.text_compensator import TextCompensator
+from modules.text_compensator import TextCompensator, build_query_analysis_payload
 from pipelines.base import BasePipeline, MockGenerator, MockReranker, PublicIndex, SupportsGenerate
 
 
@@ -21,6 +22,7 @@ class OursCh4Config:
     use_relation_driven: bool = True
     use_skeleton_rewrite: bool = True
     use_text_compensation: bool = True
+    text_compensation_strategy: str = "legacy_compensation"
     rerank: bool = True
     rerank_top_n: int | None = None
     retrieval_mode: str = "lexical"
@@ -60,9 +62,15 @@ class OursCh4Pipeline(BasePipeline):
         self.config = config or OursCh4Config()
         self.reranker = reranker or MockReranker()
         self.generator = generator or MockGenerator()
+        self.question_type_classifier = QuestionTypeClassifier()
 
     def run(self, sample: BenchmarkSample) -> PipelineRunRecord:
         skeleton = self.skeleton_extractor.extract(sample, mode=self.config.skeleton_mode)
+        query_analysis = build_query_analysis_payload(
+            sample,
+            skeleton,
+            query_analysis=self.question_type_classifier.classify(sample.question, skeleton),
+        )
         retrieve_result = self.relation_driven_retriever.retrieve(
             sample,
             skeleton,
@@ -70,12 +78,18 @@ class OursCh4Pipeline(BasePipeline):
             use_relation_driven=self.config.use_relation_driven,
             use_skeleton_rewrite=self.config.use_skeleton_rewrite,
         )
-        initial_dense_candidates = [document.section_id for document in retrieve_result.documents]
+        stage1_candidates = [
+            item["section_id"] if isinstance(item, dict) else item
+            for item in retrieve_result.details.get("candidate_pool", [])
+        ]
         compensation = self.text_compensator.compensate(
             sample,
+            skeleton,
             retrieve_result.documents,
             top_k=self.config.top_k,
             enabled=self.config.use_text_compensation,
+            query_analysis=query_analysis,
+            strategy=self.config.text_compensation_strategy,
         )
         final_documents = compensation.documents
         pre_rerank_documents = [document.model_copy() for document in final_documents]
@@ -103,18 +117,16 @@ class OursCh4Pipeline(BasePipeline):
             answer=answer_result,
             rewritten_query=retrieval_query if retrieval_query != sample.question else None,
             trace={
-                "pipeline": "question -> skeleton extract -> relation-driven retrieve -> text compensation -> rerank / merge -> generate",
-                "skeleton": {
-                    "entities": skeleton.entities,
-                    "relations": skeleton.relations,
-                    "constraints": skeleton.constraints,
-                },
+                "pipeline": "question -> predicted skeleton -> stage1 text candidate generation -> stage2 relation-driven decision -> conditional text compensation -> rerank -> generate",
+                "skeleton": skeleton.to_trace_dict(),
                 "skeleton_mode": skeleton.mode,
                 "skeleton_details": skeleton.details,
+                "query_analysis": query_analysis.to_dict(),
                 "retrieval_mode": self.config.retrieval_mode,
                 "use_rerank": self.config.rerank,
                 **self.config.trace_metadata,
-                "initial_dense_candidates": initial_dense_candidates,
+                "stage1_text_candidates": stage1_candidates,
+                "initial_dense_candidates": stage1_candidates if self.config.retrieval_mode in {"dense", "hybrid"} else [],
                 "relation_driven_candidates": [document.section_id for document in retrieve_result.documents],
                 "relation_driven_scores": retrieve_result.scores,
                 "relation_driven_details": retrieve_result.details,
@@ -129,6 +141,7 @@ class OursCh4Pipeline(BasePipeline):
                     "use_relation_driven": self.config.use_relation_driven,
                     "use_skeleton_rewrite": self.config.use_skeleton_rewrite,
                     "use_text_compensation": self.config.use_text_compensation,
+                    "text_compensation_strategy": self.config.text_compensation_strategy,
                 },
                 "generator_metadata": answer_result.metadata,
             },
