@@ -11,6 +11,7 @@ from modules.llm_query_rewrite_prompt import (
     build_llm_query_rewrite_messages,
     parse_llm_query_rewrite_payload,
 )
+from modules.question_type_classifier import QuestionTypeClassifier
 from modules.skeleton_extractor import SkeletonExtractionResult
 from retrievers.text_retriever import TextRetrieverQuery
 
@@ -43,6 +44,9 @@ class QueryRewriteResult:
     details: dict[str, Any]
     lexical_query: str
     dense_query: str
+    question_type: str = "fallback_balanced"
+    question_type_confidence: str = "low"
+    question_type_evidence: dict[str, Any] = field(default_factory=dict)
     must_keep_terms: list[str] = field(default_factory=list)
     sparse_rewrite: str = ""
     dense_rewrite: str = ""
@@ -87,6 +91,7 @@ class RetrievalLabQueryRewriter:
         self.llm_client = llm_client
         self.llm_max_tokens = llm_max_tokens
         self.llm_temperature = llm_temperature
+        self.question_type_classifier = QuestionTypeClassifier()
 
     def rewrite(
         self,
@@ -97,11 +102,13 @@ class RetrievalLabQueryRewriter:
     ) -> QueryRewriteResult:
         normalized_mode = self._normalize_mode(mode)
         request = self.build_request(sample, skeleton)
+        classification = self.question_type_classifier.classify(sample.question, skeleton)
         if normalized_mode == "original":
             return self._single_query_result(
                 query=sample.question,
                 mode=normalized_mode,
                 details={"strategy": "identity", "used_skeleton": False},
+                classification=classification,
             )
         if normalized_mode in {"template", "splicing"}:
             query = self._template_query(sample, skeleton)
@@ -109,6 +116,7 @@ class RetrievalLabQueryRewriter:
                 query=query,
                 mode=normalized_mode,
                 details={"strategy": "deterministic_splicing", "used_skeleton": True},
+                classification=classification,
             )
         if normalized_mode == "rule_based":
             query = self._rule_based_query(sample, skeleton)
@@ -116,9 +124,10 @@ class RetrievalLabQueryRewriter:
                 query=query,
                 mode=normalized_mode,
                 details={"strategy": "rule_based", "used_skeleton": True},
+                classification=classification,
             )
         if normalized_mode in {"llm", "sparse_llm", "dense_llm", "hybrid_llm"}:
-            return self._llm_rewrite(sample, skeleton, request=request, mode=normalized_mode)
+            return self._llm_rewrite(sample, skeleton, request=request, mode=normalized_mode, classification=classification)
         raise ValueError(f"Unsupported rewrite mode: {mode}")
 
     def build_request(
@@ -150,6 +159,7 @@ class RetrievalLabQueryRewriter:
         query: str,
         mode: RewriteMode,
         details: dict[str, Any],
+        classification,
         must_keep_terms: list[str] | None = None,
         sparse_rewrite: str | None = None,
         dense_rewrite: str | None = None,
@@ -158,9 +168,17 @@ class RetrievalLabQueryRewriter:
         return QueryRewriteResult(
             rewritten_query=normalized_query,
             mode=mode,
-            details=details,
+            details={
+                **details,
+                "question_type": classification.question_type,
+                "question_type_confidence": classification.question_type_confidence,
+                "question_type_evidence": classification.question_type_evidence,
+            },
             lexical_query=normalized_query,
             dense_query=normalized_query,
+            question_type=classification.question_type,
+            question_type_confidence=classification.question_type_confidence,
+            question_type_evidence=classification.question_type_evidence,
             must_keep_terms=list(must_keep_terms or []),
             sparse_rewrite=(sparse_rewrite or normalized_query).strip(),
             dense_rewrite=(dense_rewrite or normalized_query).strip(),
@@ -246,6 +264,7 @@ class RetrievalLabQueryRewriter:
         *,
         request: QueryRewriteRequest,
         mode: RewriteMode,
+        classification,
     ) -> QueryRewriteResult:
         client = self.llm_client
         if client is None:
@@ -271,7 +290,7 @@ class RetrievalLabQueryRewriter:
         except ChatLLMClientError as exc:
             raise ValueError(f"LLM rewrite request failed: {exc}") from exc
 
-        fallback_result = self._fallback_llm_result(sample, skeleton, mode=mode)
+        fallback_result = self._fallback_llm_result(sample, skeleton, mode=mode, classification=classification)
         try:
             payload = parse_llm_query_rewrite_payload(response.content)
         except ValueError as exc:
@@ -301,7 +320,7 @@ class RetrievalLabQueryRewriter:
             )
             return fallback_result
 
-        result = self._result_from_llm_payload(validated_payload, mode=mode)
+        result = self._result_from_llm_payload(validated_payload, mode=mode, classification=classification)
         result.details.update(
             {
                 "model_name": response.model_name,
@@ -319,6 +338,7 @@ class RetrievalLabQueryRewriter:
         skeleton: SkeletonExtractionResult,
         *,
         mode: RewriteMode,
+        classification,
     ) -> QueryRewriteResult:
         sparse_query = self._rule_based_query(sample, skeleton)
         dense_query = self._template_query(sample, skeleton)
@@ -334,6 +354,7 @@ class RetrievalLabQueryRewriter:
             ),
             mode=mode,
             strategy="llm_fallback",
+            classification=classification,
         )
 
     def _result_from_llm_payload(
@@ -342,14 +363,24 @@ class RetrievalLabQueryRewriter:
         *,
         mode: RewriteMode,
         strategy: str = "llm_structured",
+        classification,
     ) -> QueryRewriteResult:
         if mode == "sparse_llm":
             return QueryRewriteResult(
                 rewritten_query=payload.sparse_rewrite,
                 mode=mode,
-                details={"strategy": strategy, "used_skeleton": True},
+                details={
+                    "strategy": strategy,
+                    "used_skeleton": True,
+                    "question_type": classification.question_type,
+                    "question_type_confidence": classification.question_type_confidence,
+                    "question_type_evidence": classification.question_type_evidence,
+                },
                 lexical_query=payload.sparse_rewrite,
                 dense_query=payload.sparse_rewrite,
+                question_type=classification.question_type,
+                question_type_confidence=classification.question_type_confidence,
+                question_type_evidence=classification.question_type_evidence,
                 must_keep_terms=payload.must_keep_terms,
                 sparse_rewrite=payload.sparse_rewrite,
                 dense_rewrite=payload.dense_rewrite,
@@ -358,9 +389,18 @@ class RetrievalLabQueryRewriter:
             return QueryRewriteResult(
                 rewritten_query=payload.dense_rewrite,
                 mode=mode,
-                details={"strategy": strategy, "used_skeleton": True},
+                details={
+                    "strategy": strategy,
+                    "used_skeleton": True,
+                    "question_type": classification.question_type,
+                    "question_type_confidence": classification.question_type_confidence,
+                    "question_type_evidence": classification.question_type_evidence,
+                },
                 lexical_query=payload.dense_rewrite,
                 dense_query=payload.dense_rewrite,
+                question_type=classification.question_type,
+                question_type_confidence=classification.question_type_confidence,
+                question_type_evidence=classification.question_type_evidence,
                 must_keep_terms=payload.must_keep_terms,
                 sparse_rewrite=payload.sparse_rewrite,
                 dense_rewrite=payload.dense_rewrite,
@@ -369,9 +409,18 @@ class RetrievalLabQueryRewriter:
             return QueryRewriteResult(
                 rewritten_query=payload.dense_rewrite,
                 mode=mode,
-                details={"strategy": strategy, "used_skeleton": True},
+                details={
+                    "strategy": strategy,
+                    "used_skeleton": True,
+                    "question_type": classification.question_type,
+                    "question_type_confidence": classification.question_type_confidence,
+                    "question_type_evidence": classification.question_type_evidence,
+                },
                 lexical_query=payload.sparse_rewrite,
                 dense_query=payload.dense_rewrite,
+                question_type=classification.question_type,
+                question_type_confidence=classification.question_type_confidence,
+                question_type_evidence=classification.question_type_evidence,
                 must_keep_terms=payload.must_keep_terms,
                 sparse_rewrite=payload.sparse_rewrite,
                 dense_rewrite=payload.dense_rewrite,

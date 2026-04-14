@@ -44,6 +44,7 @@ def test_run_ours_retrieval_lab_smoke(tmp_path: Path) -> None:
     assert (output_dir / "summary.json").exists()
     assert (output_dir / "comparison.json").exists()
     assert (output_dir / "matrix.csv").exists()
+    assert (output_dir / "question_type_breakdown.json").exists()
 
     plain_predictions = output_dir / "combos" / "original__lexical__plain" / "predictions.jsonl"
     relation_predictions = output_dir / "combos" / "splicing__lexical__relation_driven" / "predictions.jsonl"
@@ -76,6 +77,36 @@ def test_run_ours_retrieval_lab_smoke(tmp_path: Path) -> None:
     assert "gold_semantic_score" in relation_row
     assert "gold_relation_score" in relation_row
     assert "filtered_out_reason_map" in relation_row
+
+
+def test_run_ours_retrieval_lab_supports_dynamic_new_outputs(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(retrieval_lab_module, "_build_llm_client", lambda max_tokens, temperature: _StubClient())
+    output_dir = tmp_path / "retrieval_lab_dynamic_new"
+    run_retrieval_lab(
+        dataset="outputs/full_run/benchmark_dataset.jsonl",
+        sections="artifacts/full_run/markdown_sections.jsonl",
+        knowledge="artifacts/full_run/knowledge_extraction.jsonl",
+        top_k=3,
+        limit=1,
+        max_workers=1,
+        skeleton_mode="oracle",
+        rewrite_modes=["hybrid_llm"],
+        retrieval_modes=["hybrid"],
+        scorer_modes=["relation_driven", "dynamic_relation_drive", "dynamic_relation_drive_new"],
+        output_dir=output_dir,
+        overwrite=True,
+        llm_rewrite_max_tokens=128,
+        llm_rewrite_temperature=0.0,
+    )
+
+    assert (output_dir / "dynamic_compare_report.json").exists()
+    assert (output_dir / "question_type_breakdown.json").exists()
+    assert (output_dir / "regression_cases.json").exists()
+    prediction_path = output_dir / "combos" / "hybrid_llm__hybrid__dynamic_relation_drive_new" / "predictions.jsonl"
+    row = json.loads(prediction_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["scorer_mode"] == "dynamic_relation_drive_new"
+    assert "adjusted_question_type_for_dynamic_new" in row
+    assert "dynamic_new_weight_profile" in row
 
 
 def test_run_ours_retrieval_lab_supports_hybrid_llm_predictions(tmp_path: Path, monkeypatch) -> None:

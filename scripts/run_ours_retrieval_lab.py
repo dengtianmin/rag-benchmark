@@ -17,8 +17,16 @@ if str(SRC_ROOT) not in sys.path:
 
 from clients.chat_llm_client import ChatLLMClient
 from dataio.loaders import load_benchmark_samples, load_graph_section_records
+from evaluation.retrieval_lab_analysis import (
+    build_combo_analysis,
+    build_dynamic_compare_report,
+    build_multi_scorer_compare_report,
+    build_regression_cases,
+)
 from evaluation.retrieval_metrics import aggregate_retrieval_metric_dicts, evaluate_retrieval_ids
 from evaluation.rewrite_diagnostics import aggregate_rewrite_diagnostics, evaluate_rewrite_diagnostics
+from modules.dynamic_relation_drive_new_retriever import DynamicRelationDriveNewRetriever
+from modules.dynamic_relation_drive_retriever import DynamicRelationDriveRetriever
 from modules.graph_expander import GraphIndex
 from modules.query_rewriters import QueryRewriteResult, RetrievalLabQueryRewriter
 from modules.relation_driven_retriever import RelationDrivenRetriever
@@ -361,6 +369,8 @@ def _process_sample(
     query_rewriter: RetrievalLabQueryRewriter,
     text_retriever,
     relation_driven: RelationDrivenRetriever,
+    dynamic_relation_drive: DynamicRelationDriveRetriever,
+    dynamic_relation_drive_new: DynamicRelationDriveNewRetriever,
 ) -> tuple[dict, dict[str, float], dict[str, float | bool]]:
     original_skeleton = skeleton_extractor.extract(sample, mode=skeleton_mode)
     rewrite_result: QueryRewriteResult = query_rewriter.rewrite(sample, original_skeleton, mode=rewrite_mode)  # type: ignore[arg-type]
@@ -368,6 +378,7 @@ def _process_sample(
     rewritten_skeleton = skeleton_extractor.extract(rewritten_sample, mode="stub_predicted")
     rewrite_diagnostics = evaluate_rewrite_diagnostics(original_skeleton, rewritten_skeleton)
     retrieval_query = rewrite_result.query_for_retrieval(trace_metadata["retrieval_mode"])
+    question_type_info = query_rewriter.question_type_classifier.classify(sample.question, original_skeleton)
 
     if scorer_mode == "plain":
         documents = text_retriever.retrieve(retrieval_query, top_k=top_k)
@@ -384,6 +395,28 @@ def _process_sample(
             use_relation_driven=True,
             use_skeleton_rewrite=False,
             query_override=retrieval_query,
+        )
+        documents = retrieve_result.documents
+        retrieval_trace = retrieve_result.details
+    elif scorer_mode == "dynamic_relation_drive":
+        retrieve_result = dynamic_relation_drive.retrieve(
+            sample,
+            original_skeleton,
+            top_k=top_k,
+            use_skeleton_rewrite=False,
+            query_override=retrieval_query,
+            question_type_info=question_type_info,
+        )
+        documents = retrieve_result.documents
+        retrieval_trace = retrieve_result.details
+    elif scorer_mode == "dynamic_relation_drive_new":
+        retrieve_result = dynamic_relation_drive_new.retrieve(
+            sample,
+            original_skeleton,
+            top_k=top_k,
+            use_skeleton_rewrite=False,
+            query_override=retrieval_query,
+            question_type_info=question_type_info,
         )
         documents = retrieve_result.documents
         retrieval_trace = retrieve_result.details
@@ -424,6 +457,9 @@ def _process_sample(
         "rewritten_query": rewrite_result.rewritten_query,
         "lexical_query": rewrite_result.lexical_query,
         "dense_query": rewrite_result.dense_query,
+        "question_type": rewrite_result.question_type,
+        "question_type_confidence": rewrite_result.question_type_confidence,
+        "question_type_evidence": rewrite_result.question_type_evidence,
         "structured_rewrite": rewrite_result.structured_rewrite(),
         "original_skeleton": _skeleton_dict(original_skeleton),
         "rewritten_skeleton": _skeleton_dict(rewritten_skeleton),
@@ -443,7 +479,7 @@ def _process_sample(
             "retrieval_trace": retrieval_trace,
         },
     }
-    if scorer_mode == "relation_driven":
+    if scorer_mode in {"relation_driven", "dynamic_relation_drive", "dynamic_relation_drive_new"}:
         row["dense_scores"] = {
             item.section_id: float(item.metadata.get("semantic_raw", item.metadata.get("dense_score", item.score)))
             for item in documents
@@ -462,6 +498,87 @@ def _process_sample(
         }
         row["reasons"] = {
             item.section_id: item.metadata.get("filter_reasons", [])
+            for item in documents
+        }
+    if scorer_mode == "dynamic_relation_drive":
+        row["dynamic_weight_profile"] = retrieval_trace.get("fusion_weights", {})
+        row["semantic_score"] = {
+            item.section_id: float(item.metadata.get("semantic_score", 0.0))
+            for item in documents
+        }
+        row["entity_alignment_score"] = {
+            item.section_id: float(item.metadata.get("entity_alignment_score", 0.0))
+            for item in documents
+        }
+        row["relation_alignment_score"] = {
+            item.section_id: float(item.metadata.get("relation_alignment_score", 0.0))
+            for item in documents
+        }
+        row["constraint_score"] = {
+            item.section_id: float(item.metadata.get("constraint_score", item.metadata.get("constraint_satisfaction_score", 0.0)))
+            for item in documents
+        }
+        row["final_fusion_score"] = {
+            item.section_id: float(item.metadata.get("final_fusion_score", item.score))
+            for item in documents
+        }
+        row["soft_penalties"] = {
+            item.section_id: item.metadata.get("soft_penalties", {})
+            for item in documents
+        }
+        row["conflict_penalty"] = {
+            item.section_id: float(item.metadata.get("conflict_penalty", 0.0))
+            for item in documents
+        }
+        row["filter_reasons"] = {
+            item.section_id: item.metadata.get("filter_reasons", [])
+            for item in documents
+        }
+        row["whether_high_semantic_protection_triggered"] = {
+            item.section_id: bool(item.metadata.get("whether_high_semantic_protection_triggered", False))
+            for item in documents
+        }
+    if scorer_mode == "dynamic_relation_drive_new":
+        row["adjusted_question_type_for_dynamic_new"] = retrieval_trace.get("adjusted_question_type_for_dynamic_new")
+        row["dynamic_new_weight_profile"] = retrieval_trace.get("fusion_weights", {})
+        row["semantic_score"] = {
+            item.section_id: float(item.metadata.get("semantic_score", 0.0))
+            for item in documents
+        }
+        row["entity_alignment_score"] = {
+            item.section_id: float(item.metadata.get("entity_alignment_score", 0.0))
+            for item in documents
+        }
+        row["relation_alignment_score"] = {
+            item.section_id: float(item.metadata.get("relation_alignment_score", 0.0))
+            for item in documents
+        }
+        row["constraint_score"] = {
+            item.section_id: float(item.metadata.get("constraint_score", item.metadata.get("constraint_satisfaction_score", 0.0)))
+            for item in documents
+        }
+        row["final_fusion_score"] = {
+            item.section_id: float(item.metadata.get("final_fusion_score", item.score))
+            for item in documents
+        }
+        row["soft_penalties"] = {
+            item.section_id: item.metadata.get("soft_penalties", {})
+            for item in documents
+        }
+        row["conflict_penalty"] = {
+            item.section_id: float(item.metadata.get("conflict_penalty", 0.0))
+            for item in documents
+        }
+        row["filter_reasons"] = {
+            item.section_id: item.metadata.get("filter_reasons", [])
+            for item in documents
+        }
+        row["hard_drop_triggered"] = {
+            item.section_id: bool(item.metadata.get("hard_drop_triggered", False))
+            for item in documents
+        }
+        row["high_semantic_protection_triggered"] = {
+            item.section_id: bool(item.metadata.get("high_semantic_protection_triggered", False))
             for item in documents
         }
     return row, retrieval_metrics, rewrite_diagnostics
@@ -534,6 +651,7 @@ def run_retrieval_lab(
 
     comparison_rows: list[dict] = []
     summary_payload: dict[str, dict] = {}
+    combo_prediction_rows: dict[str, list[dict]] = {}
     combos = [
         (rewrite_mode, retrieval_mode, scorer_mode)
         for retrieval_mode in retrieval_modes
@@ -547,6 +665,8 @@ def run_retrieval_lab(
         trace_metadata = build_trace_metadata(settings)
         text_retriever = build_text_retriever(index=text_index, settings=settings)
         relation_driven = RelationDrivenRetriever(text_index, graph_index, text_retriever=text_retriever)
+        dynamic_relation_drive = DynamicRelationDriveRetriever(text_index, graph_index, text_retriever=text_retriever)
+        dynamic_relation_drive_new = DynamicRelationDriveNewRetriever(text_index, graph_index, text_retriever=text_retriever)
         combo = _combo_name(rewrite_mode, retrieval_mode, scorer_mode)
         print(f"\n[combo] {combo}")
         combo_dir = combos_dir / combo
@@ -569,6 +689,8 @@ def run_retrieval_lab(
                     query_rewriter=query_rewriter,
                     text_retriever=text_retriever,
                     relation_driven=relation_driven,
+                    dynamic_relation_drive=dynamic_relation_drive,
+                    dynamic_relation_drive_new=dynamic_relation_drive_new,
                 )
                 prediction_rows[index] = row
                 retrieval_metric_rows[index] = retrieval_metrics
@@ -588,6 +710,8 @@ def run_retrieval_lab(
                         query_rewriter=query_rewriter,
                         text_retriever=text_retriever,
                         relation_driven=relation_driven,
+                        dynamic_relation_drive=dynamic_relation_drive,
+                        dynamic_relation_drive_new=dynamic_relation_drive_new,
                     ): index
                     for index, sample in enumerate(samples)
                 }
@@ -604,6 +728,7 @@ def run_retrieval_lab(
 
         aggregate_retrieval = aggregate_retrieval_metric_dicts(retrieval_metric_rows, top_k)
         aggregate_diagnostics = aggregate_rewrite_diagnostics(rewrite_metric_rows)
+        combo_analysis = build_combo_analysis(prediction_rows, top_k=top_k)
         combo_metrics = {
             "combo": combo,
             "rewrite_mode": rewrite_mode,
@@ -613,6 +738,7 @@ def run_retrieval_lab(
             "top_k": top_k,
             "retrieval": aggregate_retrieval,
             "rewrite_diagnostics": aggregate_diagnostics,
+            "analysis": combo_analysis,
         }
         with (combo_dir / "predictions.jsonl").open("w", encoding="utf-8") as handle:
             for row in prediction_rows:
@@ -621,6 +747,7 @@ def run_retrieval_lab(
             json.dump(combo_metrics, handle, ensure_ascii=False, indent=2)
 
         summary_payload[combo] = combo_metrics
+        combo_prediction_rows[combo] = prediction_rows
         comparison_row = {
             "combo": combo,
             "rewrite_mode": rewrite_mode,
@@ -634,6 +761,9 @@ def run_retrieval_lab(
             "entity_retention_recall": aggregate_diagnostics["entity_retention_recall"],
             "relation_retention_recall": aggregate_diagnostics["relation_retention_recall"],
             "constraint_retention_recall": aggregate_diagnostics["constraint_retention_recall"],
+            "stage1_pool_recall_rate": combo_analysis["stage1_pool_recall_rate"],
+            "in_stage1_but_filtered_rate": combo_analysis["in_stage1_but_filtered_rate"],
+            "in_final_candidates_but_rank_too_low_rate": combo_analysis["in_final_candidates_but_rank_too_low_rate"],
         }
         comparison_rows.append(comparison_row)
         print(
@@ -649,6 +779,61 @@ def run_retrieval_lab(
         json.dump(summary_payload, handle, ensure_ascii=False, indent=2)
     with (output_path / "comparison.json").open("w", encoding="utf-8") as handle:
         json.dump(comparison_rows, handle, ensure_ascii=False, indent=2)
+    dynamic_compare_payload: dict[str, object] = {}
+    grouped_compare_keys = {
+        (item["rewrite_mode"], item["retrieval_mode"]): {}
+        for item in comparison_rows
+    }
+    for item in comparison_rows:
+        grouped_compare_keys[(item["rewrite_mode"], item["retrieval_mode"])][item["scorer_mode"]] = item["combo"]
+    for (rewrite_mode, retrieval_mode), scorer_map in grouped_compare_keys.items():
+        relation_combo = scorer_map.get("relation_driven")
+        dynamic_combo = scorer_map.get("dynamic_relation_drive")
+        if not relation_combo or not dynamic_combo:
+            continue
+        report_key = f"{rewrite_mode}__{retrieval_mode}"
+        dynamic_compare_payload[report_key] = build_dynamic_compare_report(
+            relation_summary=summary_payload[relation_combo],
+            dynamic_summary=summary_payload[dynamic_combo],
+            relation_predictions=combo_prediction_rows[relation_combo],
+            dynamic_predictions=combo_prediction_rows[dynamic_combo],
+            top_k=top_k,
+        )
+    with (output_path / "dynamic_compare_report.json").open("w", encoding="utf-8") as handle:
+        json.dump(
+            build_multi_scorer_compare_report(
+                summary_payload=summary_payload,
+                combo_prediction_rows=combo_prediction_rows,
+                grouped_compare_keys=grouped_compare_keys,
+                top_k=top_k,
+            )
+            if any("dynamic_relation_drive_new" in scorer_map for scorer_map in grouped_compare_keys.values())
+            else dynamic_compare_payload,
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+    question_type_breakdown_payload = {
+        combo: summary_payload[combo]["analysis"]["question_type_breakdown"]
+        for combo in summary_payload
+    }
+    with (output_path / "question_type_breakdown.json").open("w", encoding="utf-8") as handle:
+        json.dump(question_type_breakdown_payload, handle, ensure_ascii=False, indent=2)
+    regression_cases_payload: dict[str, object] = {}
+    for (rewrite_mode, retrieval_mode), scorer_map in grouped_compare_keys.items():
+        relation_combo = scorer_map.get("relation_driven")
+        dynamic_combo = scorer_map.get("dynamic_relation_drive")
+        dynamic_new_combo = scorer_map.get("dynamic_relation_drive_new")
+        if not relation_combo or not dynamic_combo or not dynamic_new_combo:
+            continue
+        regression_cases_payload[f"{rewrite_mode}__{retrieval_mode}"] = build_regression_cases(
+            relation_rows=combo_prediction_rows[relation_combo],
+            dynamic_rows=combo_prediction_rows[dynamic_combo],
+            dynamic_new_rows=combo_prediction_rows[dynamic_new_combo],
+            top_k=top_k,
+        )
+    with (output_path / "regression_cases.json").open("w", encoding="utf-8") as handle:
+        json.dump(regression_cases_payload, handle, ensure_ascii=False, indent=2)
     matrix_columns = [
         "combo",
         "rewrite_mode",
@@ -662,6 +847,9 @@ def run_retrieval_lab(
         "entity_retention_recall",
         "relation_retention_recall",
         "constraint_retention_recall",
+        "stage1_pool_recall_rate",
+        "in_stage1_but_filtered_rate",
+        "in_final_candidates_but_rank_too_low_rate",
     ]
     with (output_path / "matrix.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=matrix_columns)
