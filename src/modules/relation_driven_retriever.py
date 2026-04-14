@@ -6,7 +6,7 @@ from core.schema import BenchmarkSample, RetrievedDocument
 from modules.graph_expander import GraphIndex
 from modules.skeleton_extractor import SkeletonExtractionResult
 from pipelines.base import PublicIndex, overlap_score
-from retrievers.text_retriever import LexicalTextRetriever, SupportsRetrieve
+from retrievers.text_retriever import LexicalTextRetriever, SupportsRetrieve, TextRetrieverQuery
 
 
 @dataclass(slots=True)
@@ -44,7 +44,7 @@ class RelationDrivenRetriever:
         top_k: int,
         use_relation_driven: bool = True,
         use_skeleton_rewrite: bool = True,
-        query_override: str | None = None,
+        query_override: str | TextRetrieverQuery | None = None,
     ) -> RelationDrivenRetrieveResult:
         if query_override is not None:
             stage1_query = query_override
@@ -56,6 +56,14 @@ class RelationDrivenRetriever:
             stage1_query = sample.question
             query_source = "original_question"
         candidate_pool = self.text_retriever.retrieve(stage1_query, top_k=max(top_k * 4, top_k))
+        stage1_candidate_rows = [self._candidate_trace_row(document) for document in candidate_pool]
+        if isinstance(stage1_query, TextRetrieverQuery):
+            query_trace = {
+                "lexical_query": stage1_query.lexical_query,
+                "dense_query": stage1_query.dense_query,
+            }
+        else:
+            query_trace = stage1_query
         candidate_map = {document.section_id: document for document in candidate_pool}
         target_relations = [relation for relation in skeleton.structured_relations if relation.role == "target"] or skeleton.structured_relations
         anchor_entities = [entity for entity in skeleton.structured_entities if entity.role == "anchor"] or skeleton.structured_entities
@@ -82,9 +90,13 @@ class RelationDrivenRetriever:
                 scores={document.section_id: document.score for document in documents},
                 details={
                     "mode": "text_only",
-                    "stage1_query": stage1_query,
+                    "stage1_query": query_trace,
                     "query_source": query_source,
-                    "candidate_pool": [document.section_id for document in candidate_pool],
+                    "candidate_pool": stage1_candidate_rows,
+                    "kept_section_ids": [document.section_id for document in documents],
+                    "filtered_out_section_ids": [],
+                    "filtered_out_reason_map": {},
+                    "recovered_section_ids": [],
                     "kept_reasons": {document.section_id: ["semantic_rank"] for document in documents},
                     "fusion_weights": {"semantic": 1.0, "alignment": 0.0, "constraint": 0.0},
                 },
@@ -142,6 +154,7 @@ class RelationDrivenRetriever:
                     constraint_satisfaction["score"],
                     conflict,
                     gate,
+                    relation_alignment["matches"],
                 ),
                 "final_score": final_score,
             }
@@ -150,6 +163,7 @@ class RelationDrivenRetriever:
                 continue
             candidate_breakdown[section_id] = breakdown
 
+        recovery_ids: list[str] = []
         if len(candidate_breakdown) < top_k:
             recovery_ids = sorted(
                 filtered_out,
@@ -198,16 +212,9 @@ class RelationDrivenRetriever:
             scores={section_id: candidate_breakdown[section_id]["final_score"] for section_id in ranked_ids},
             details={
                 "mode": "relation_driven",
-                "stage1_query": stage1_query,
+                "stage1_query": query_trace,
                 "query_source": query_source,
-                "candidate_pool": [
-                    {
-                        "section_id": document.section_id,
-                        "stage1_rank": document.rank,
-                        "stage1_score": semantic_raw.get(document.section_id, float(document.score)),
-                    }
-                    for document in candidate_pool
-                ],
+                "candidate_pool": stage1_candidate_rows,
                 "skeleton_aware_scores": {
                     section_id: candidate_breakdown[section_id]
                     for section_id in ranked_ids
@@ -224,6 +231,13 @@ class RelationDrivenRetriever:
                     },
                 },
                 "final_ranked_sections": ranked_ids,
+                "kept_section_ids": list(candidate_breakdown.keys()),
+                "filtered_out_section_ids": sorted(filtered_out.keys()),
+                "filtered_out_reason_map": {
+                    section_id: list(filtered_out[section_id].get("filter_reasons", []))
+                    for section_id in filtered_out
+                },
+                "recovered_section_ids": recovery_ids,
                 "fusion_weights": {"semantic": self.alpha, "alignment": self.beta, "constraint": self.gamma},
                 "structural_focus": {
                     "anchor_entities": [entity.name for entity in anchor_entities],
@@ -231,6 +245,20 @@ class RelationDrivenRetriever:
                 },
             },
         )
+
+    def _candidate_trace_row(self, document: RetrievedDocument) -> dict:
+        branch_trace = document.metadata.get("hybrid_branch_trace", {})
+        return {
+            "section_id": document.section_id,
+            "stage1_rank": document.rank,
+            "stage1_score": float(document.score),
+            "lexical_score": float(document.metadata.get("lexical_score", document.score)),
+            "dense_score": float(document.metadata.get("dense_score", document.score)),
+            "hybrid_score": float(document.metadata.get("hybrid_score", document.score)),
+            "hybrid_sources": list(document.metadata.get("hybrid_sources", [])),
+            "retriever": document.metadata.get("retriever"),
+            "branch_trace": branch_trace if isinstance(branch_trace, dict) else {},
+        }
 
     def _normalize_scores(self, scores: dict[str, float]) -> dict[str, float]:
         if not scores:
@@ -279,6 +307,7 @@ class RelationDrivenRetriever:
         section_relations = self.graph_index.section_to_relations.get(section_id, set())
         section_entities = self.graph_index.section_to_entities.get(section_id, set())
         for relation in relations:
+            generic_relation = self._is_generic_relation_term(relation.name)
             predicate_match = relation.normalized_name in section_relations
             relation_type_match = relation.relation_type != "factoid" and any(
                 relation.relation_type in self._infer_relation_types(predicate)
@@ -302,7 +331,12 @@ class RelationDrivenRetriever:
             lexical = overlap_score(relation.name, content)
             type_bonus = 0.35 if relation_type_match else 0.0
             role_weight = 1.25 if relation.role == "target" else 1.0
-            contribution = role_weight * ((1.0 if predicate_match else lexical) + endpoint_bonus + type_bonus)
+            generic_penalty = 0.4 if generic_relation else 1.0
+            if generic_relation:
+                lexical *= 0.35
+                endpoint_bonus *= 0.5
+                type_bonus *= 0.35
+            contribution = role_weight * generic_penalty * ((1.0 if predicate_match else lexical) + endpoint_bonus + type_bonus)
             total += min(1.0, contribution)
             if predicate_match or lexical > 0 or endpoint_bonus > 0 or relation_type_match:
                 matches.append(
@@ -315,6 +349,8 @@ class RelationDrivenRetriever:
                         "directional_match": directional_match,
                         "lexical": lexical,
                         "endpoint_bonus": endpoint_bonus,
+                        "generic_relation": generic_relation,
+                        "generic_penalty": generic_penalty,
                     }
                 )
         return {"score": min(1.0, total / max(len(relations), 1)), "matches": matches}
@@ -416,6 +452,36 @@ class RelationDrivenRetriever:
             relation_types.add("relation")
         return relation_types or {"factoid"}
 
+    def _is_generic_relation_term(self, text: str) -> bool:
+        normalized = str(text).strip().lower()
+        if not normalized:
+            return False
+        generic_terms = {
+            "支持",
+            "提供",
+            "实现",
+            "具备",
+            "承担",
+            "采用",
+            "用于",
+            "进行",
+            "拥有",
+            "包含",
+            "包括",
+            "涉及",
+            "相关",
+            "作用",
+            "方式",
+            "功能",
+            "特点",
+            "说明",
+            "介绍",
+            "达到",
+        }
+        if normalized in generic_terms:
+            return True
+        return len(normalized) <= 2 and normalized in {"有", "是", "为", "将", "把"}
+
     def _build_filter_reasons(
         self,
         semantic_score: float,
@@ -424,12 +490,15 @@ class RelationDrivenRetriever:
         constraint_score: float,
         conflict: dict,
         gate: dict,
+        relation_matches: list[dict],
     ) -> list[str]:
         reasons = []
         if semantic_score >= 0.4:
             reasons.append("strong_semantic_match")
         elif semantic_score < 0.15:
             reasons.append("weak_semantic_match")
+        if any(match.get("generic_relation") for match in relation_matches):
+            reasons.append("generic_relation_match")
         if relation_score >= 0.4:
             reasons.append("relation_aligned")
         elif relation_score < 0.1:

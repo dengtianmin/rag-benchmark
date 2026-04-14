@@ -3,20 +3,37 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from clients.chat_llm_client import ChatLLMResponse
+from scripts import run_ours_retrieval_lab as retrieval_lab_module
 from scripts.run_ours_retrieval_lab import run_retrieval_lab
+
+
+class _StubClient:
+    api_key = "stub-key"
+    model = "stub-model"
+
+    def chat_completion(self, **kwargs) -> ChatLLMResponse:
+        del kwargs
+        return ChatLLMResponse(
+            content='{"must_keep_terms":["Alpha","合作原因"],"sparse_rewrite":"Alpha 合作原因 2019年","dense_rewrite":"2019年 Alpha 与 Beta 合作原因"}',
+            model_name=self.model,
+            finish_reason="stop",
+            raw={"choices": []},
+            latency_ms=1,
+        )
 
 
 def test_run_ours_retrieval_lab_smoke(tmp_path: Path) -> None:
     output_dir = tmp_path / "retrieval_lab"
     result = run_retrieval_lab(
-        dataset="outputs/two_file_demo/benchmark_dataset.jsonl",
-        sections="artifacts/two_file_demo/markdown_sections.jsonl",
-        knowledge="artifacts/two_file_demo/knowledge_extraction.jsonl",
+        dataset="outputs/full_run/benchmark_dataset.jsonl",
+        sections="artifacts/full_run/markdown_sections.jsonl",
+        knowledge="artifacts/full_run/knowledge_extraction.jsonl",
         top_k=3,
         limit=2,
         max_workers=1,
         skeleton_mode="oracle",
-        rewrite_modes=["original", "template"],
+        rewrite_modes=["original", "splicing"],
         retrieval_modes=["lexical"],
         scorer_modes=["plain", "relation_driven"],
         output_dir=output_dir,
@@ -29,7 +46,7 @@ def test_run_ours_retrieval_lab_smoke(tmp_path: Path) -> None:
     assert (output_dir / "matrix.csv").exists()
 
     plain_predictions = output_dir / "combos" / "original__lexical__plain" / "predictions.jsonl"
-    relation_predictions = output_dir / "combos" / "template__lexical__relation_driven" / "predictions.jsonl"
+    relation_predictions = output_dir / "combos" / "splicing__lexical__relation_driven" / "predictions.jsonl"
     assert plain_predictions.exists()
     assert relation_predictions.exists()
 
@@ -39,7 +56,79 @@ def test_run_ours_retrieval_lab_smoke(tmp_path: Path) -> None:
     assert plain_row["scorer_mode"] == "plain"
     assert "dense_scores" not in plain_row
     assert plain_row["trace_metadata"]["retrieval_trace"]["mode"] == "plain"
+    assert plain_row["lexical_query"] == plain_row["rewritten_query"]
+    assert plain_row["dense_query"] == plain_row["rewritten_query"]
+    assert "structured_rewrite" in plain_row
+    assert isinstance(plain_row["stage1_query"], str)
+    assert isinstance(plain_row["stage1_candidate_ids"], list)
+    assert "gold_in_stage1_pool" in plain_row
+    assert plain_row["miss_type"] in {
+        "in_final_topk",
+        "not_in_stage1_pool",
+        "in_stage1_but_filtered",
+        "in_final_candidates_but_rank_too_low",
+        "unknown",
+    }
 
     assert relation_row["scorer_mode"] == "relation_driven"
     assert "dense_scores" in relation_row
     assert relation_row["trace_metadata"]["retrieval_trace"]["mode"] == "relation_driven"
+    assert "gold_semantic_score" in relation_row
+    assert "gold_relation_score" in relation_row
+    assert "filtered_out_reason_map" in relation_row
+
+
+def test_run_ours_retrieval_lab_supports_hybrid_llm_predictions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(retrieval_lab_module, "_build_llm_client", lambda max_tokens, temperature: _StubClient())
+    output_dir = tmp_path / "retrieval_lab_hybrid"
+    result = run_retrieval_lab(
+        dataset="outputs/full_run/benchmark_dataset.jsonl",
+        sections="artifacts/full_run/markdown_sections.jsonl",
+        knowledge="artifacts/full_run/knowledge_extraction.jsonl",
+        top_k=3,
+        limit=1,
+        max_workers=1,
+        skeleton_mode="oracle",
+        rewrite_modes=["hybrid_llm"],
+        retrieval_modes=["lexical"],
+        scorer_modes=["plain"],
+        output_dir=output_dir,
+        overwrite=True,
+        llm_rewrite_max_tokens=128,
+        llm_rewrite_temperature=0.0,
+    )
+
+    assert result.exists()
+    prediction_path = output_dir / "combos" / "hybrid_llm__lexical__plain" / "predictions.jsonl"
+    row = json.loads(prediction_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["rewrite_mode"] == "hybrid_llm"
+    assert row["lexical_query"] == "Alpha 合作原因 2019年"
+    assert row["dense_query"] == "2019年 Alpha 与 Beta 合作原因"
+    assert row["trace_metadata"]["retrieval_trace"]["stage1_query"] == "Alpha 合作原因 2019年"
+
+
+def test_run_ours_retrieval_lab_records_hybrid_branch_trace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(retrieval_lab_module, "_build_llm_client", lambda max_tokens, temperature: _StubClient())
+    output_dir = tmp_path / "retrieval_lab_hybrid_dense"
+    run_retrieval_lab(
+        dataset="outputs/full_run/benchmark_dataset.jsonl",
+        sections="artifacts/full_run/markdown_sections.jsonl",
+        knowledge="artifacts/full_run/knowledge_extraction.jsonl",
+        top_k=3,
+        limit=1,
+        max_workers=1,
+        skeleton_mode="oracle",
+        rewrite_modes=["hybrid_llm"],
+        retrieval_modes=["hybrid"],
+        scorer_modes=["plain"],
+        output_dir=output_dir,
+        overwrite=True,
+        llm_rewrite_max_tokens=128,
+        llm_rewrite_temperature=0.0,
+    )
+
+    prediction_path = output_dir / "combos" / "hybrid_llm__hybrid__plain" / "predictions.jsonl"
+    row = json.loads(prediction_path.read_text(encoding="utf-8").splitlines()[0])
+    assert "lexical_stage1_candidate_ids" in row
+    assert "dense_stage1_candidate_ids" in row
+    assert "final_topk_source_breakdown" in row

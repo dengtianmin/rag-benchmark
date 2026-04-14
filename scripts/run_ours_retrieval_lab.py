@@ -24,7 +24,7 @@ from modules.query_rewriters import QueryRewriteResult, RetrievalLabQueryRewrite
 from modules.relation_driven_retriever import RelationDrivenRetriever
 from modules.skeleton_extractor import SkeletonExtractionResult, SkeletonExtractor
 from pipelines.base import PublicIndex
-from retrievers.text_retriever import build_text_retriever
+from retrievers.text_retriever import TextRetrieverQuery, build_text_retriever
 from runtime_config import build_trace_metadata, load_runtime_settings
 
 
@@ -95,6 +95,260 @@ def _truncate_document(document, max_chars: int = 240) -> dict:
     }
 
 
+def _serialize_stage1_query(query: str | TextRetrieverQuery) -> str | dict[str, str]:
+    if isinstance(query, TextRetrieverQuery):
+        return {
+            "lexical_query": query.lexical_query,
+            "dense_query": query.dense_query,
+        }
+    return query
+
+
+def _best_rank(ids: list[str], gold_ids: set[str]) -> int | None:
+    ranks = [index for index, section_id in enumerate(ids, start=1) if section_id in gold_ids]
+    return min(ranks) if ranks else None
+
+
+def _extract_stage1_rows(
+    *,
+    scorer_mode: str,
+    retrieval_query: str | TextRetrieverQuery,
+    documents,
+    retrieval_trace: dict,
+) -> list[dict]:
+    candidate_pool = retrieval_trace.get("candidate_pool", [])
+    if candidate_pool and isinstance(candidate_pool[0], dict):
+        return candidate_pool
+    rows: list[dict] = []
+    for document in documents:
+        rows.append(
+            {
+                "section_id": document.section_id,
+                "stage1_rank": document.rank,
+                "stage1_score": float(document.score),
+                "lexical_score": float(document.metadata.get("lexical_score", document.score)),
+                "dense_score": float(document.metadata.get("dense_score", document.score)),
+                "hybrid_score": float(document.metadata.get("hybrid_score", document.score)),
+                "hybrid_sources": list(document.metadata.get("hybrid_sources", [])),
+                "retriever": document.metadata.get("retriever", scorer_mode),
+                "branch_trace": (
+                    document.metadata.get("hybrid_branch_trace", {})
+                    if isinstance(document.metadata.get("hybrid_branch_trace"), dict)
+                    else {}
+                ),
+            }
+        )
+    if not rows and isinstance(retrieval_query, TextRetrieverQuery):
+        rows.append(
+            {
+                "section_id": "",
+                "stage1_rank": 0,
+                "stage1_score": 0.0,
+                "lexical_score": 0.0,
+                "dense_score": 0.0,
+                "hybrid_score": 0.0,
+                "hybrid_sources": [],
+                "retriever": scorer_mode,
+                "branch_trace": {
+                    "lexical_query": retrieval_query.lexical_query,
+                    "dense_query": retrieval_query.dense_query,
+                    "lexical_candidate_ids": [],
+                    "dense_candidate_ids": [],
+                    "lexical_candidate_scores": {},
+                    "dense_candidate_scores": {},
+                },
+            }
+        )
+    return [row for row in rows if row.get("section_id")]
+
+
+def _hybrid_branch_trace(stage1_rows: list[dict], retrieval_query: str | TextRetrieverQuery) -> dict:
+    branch_trace: dict = {}
+    for row in stage1_rows:
+        candidate_trace = row.get("branch_trace")
+        if isinstance(candidate_trace, dict) and candidate_trace:
+            branch_trace = candidate_trace
+            break
+    if not branch_trace and isinstance(retrieval_query, TextRetrieverQuery):
+        branch_trace = {
+            "lexical_query": retrieval_query.lexical_query,
+            "dense_query": retrieval_query.dense_query,
+            "lexical_candidate_ids": [],
+            "dense_candidate_ids": [],
+            "lexical_candidate_scores": {},
+            "dense_candidate_scores": {},
+        }
+    return branch_trace
+
+
+def _gold_trace_payload(
+    *,
+    gold_section_ids: set[str],
+    stage1_rows: list[dict],
+    final_topk_ids: list[str],
+    retrieval_trace: dict,
+) -> dict:
+    stage1_ids = [row["section_id"] for row in stage1_rows]
+    gold_stage1_hits = [section_id for section_id in stage1_ids if section_id in gold_section_ids]
+    gold_in_stage1_pool = bool(gold_stage1_hits)
+    gold_best_rank_stage1 = _best_rank(stage1_ids, gold_section_ids)
+    gold_in_final_topk = bool(gold_section_ids & set(final_topk_ids))
+    gold_best_rank_final = _best_rank(final_topk_ids, gold_section_ids)
+
+    kept_ids = list(retrieval_trace.get("kept_section_ids", final_topk_ids))
+    filtered_ids = list(retrieval_trace.get("filtered_out_section_ids", []))
+    filtered_reason_map = {
+        section_id: reasons
+        for section_id, reasons in (retrieval_trace.get("filtered_out_reason_map", {}) or {}).items()
+    }
+    gold_filtered_ids = [section_id for section_id in gold_section_ids if section_id in filtered_ids]
+    gold_filtered_reason = filtered_reason_map.get(gold_filtered_ids[0], []) if gold_filtered_ids else []
+
+    if gold_in_final_topk:
+        miss_type = "in_final_topk"
+        miss_reason_summary = "gold document reached final top-k"
+    elif not gold_in_stage1_pool:
+        miss_type = "not_in_stage1_pool"
+        miss_reason_summary = "gold document missing from stage1 candidate pool"
+    elif gold_filtered_ids:
+        miss_type = "in_stage1_but_filtered"
+        miss_reason_summary = "gold document entered stage1 but was filtered before final ranking"
+    elif any(section_id in kept_ids for section_id in gold_section_ids):
+        miss_type = "in_final_candidates_but_rank_too_low"
+        miss_reason_summary = "gold document survived filtering but did not enter final top-k"
+    else:
+        miss_type = "unknown"
+        miss_reason_summary = "gold miss could not be attributed to a known stage"
+
+    all_gold_breakdowns: list[dict] = []
+    breakdown_sources = [
+        retrieval_trace.get("skeleton_aware_scores", {}) or {},
+        retrieval_trace.get("filtered_out", {}) or {},
+    ]
+    for source in breakdown_sources:
+        for section_id in gold_section_ids:
+            if section_id in source:
+                all_gold_breakdowns.append(
+                    {
+                        "section_id": section_id,
+                        "kept": section_id not in filtered_ids,
+                        "breakdown": source[section_id],
+                    }
+                )
+    representative_gold = None
+    if all_gold_breakdowns:
+        representative_gold = max(
+            all_gold_breakdowns,
+            key=lambda item: float(item["breakdown"].get("final_score", 0.0)),
+        )
+    return {
+        "stage1_candidate_ids": stage1_ids,
+        "stage1_candidate_count": len(stage1_ids),
+        "stage1_candidate_scores": {
+            row["section_id"]: float(row.get("stage1_score", 0.0))
+            for row in stage1_rows
+        },
+        "gold_in_stage1_pool": gold_in_stage1_pool,
+        "gold_best_rank_stage1": gold_best_rank_stage1,
+        "gold_stage1_hits": gold_stage1_hits,
+        "final_topk_ids": final_topk_ids,
+        "gold_in_final_topk": gold_in_final_topk,
+        "gold_best_rank_final": gold_best_rank_final,
+        "final_topk_count": len(final_topk_ids),
+        "miss_type": miss_type,
+        "miss_reason_summary": miss_reason_summary,
+        "kept_section_ids": kept_ids,
+        "filtered_out_section_ids": filtered_ids,
+        "filtered_out_reason_map": filtered_reason_map,
+        "recovered_section_ids": list(retrieval_trace.get("recovered_section_ids", [])),
+        "gold_filtered_out": bool(gold_filtered_ids),
+        "gold_filtered_reason": gold_filtered_reason,
+        "representative_gold_section_id": representative_gold["section_id"] if representative_gold else None,
+        "gold_semantic_score": (
+            float(representative_gold["breakdown"].get("semantic_score", 0.0))
+            if representative_gold
+            else None
+        ),
+        "gold_entity_alignment_score": (
+            float(representative_gold["breakdown"].get("entity_alignment_score", 0.0))
+            if representative_gold
+            else None
+        ),
+        "gold_relation_score": (
+            float(representative_gold["breakdown"].get("relation_alignment_score", 0.0))
+            if representative_gold
+            else None
+        ),
+        "gold_constraint_score": (
+            float(representative_gold["breakdown"].get("constraint_satisfaction_score", 0.0))
+            if representative_gold
+            else None
+        ),
+        "gold_fusion_score": (
+            float(representative_gold["breakdown"].get("final_score", 0.0))
+            if representative_gold
+            else None
+        ),
+        "gold_filter_reasons": (
+            list(representative_gold["breakdown"].get("filter_reasons", []))
+            if representative_gold
+            else []
+        ),
+        "gold_kept_or_filtered": (
+            "kept" if representative_gold and representative_gold["kept"] else "filtered"
+            if representative_gold
+            else "missing"
+        ),
+    }
+
+
+def _hybrid_source_payload(
+    *,
+    retrieval_mode: str,
+    gold_section_ids: set[str],
+    stage1_rows: list[dict],
+    final_documents,
+    retrieval_query: str | TextRetrieverQuery,
+) -> dict:
+    if retrieval_mode != "hybrid":
+        return {
+            "lexical_stage1_candidate_ids": [],
+            "dense_stage1_candidate_ids": [],
+            "gold_in_lexical_pool": False,
+            "gold_in_dense_pool": False,
+            "gold_only_in_lexical": False,
+            "gold_only_in_dense": False,
+            "gold_in_both_pools": False,
+            "final_topk_source_breakdown": {"lexical": 0, "dense": 0, "both": 0, "unknown": 0},
+        }
+    branch_trace = _hybrid_branch_trace(stage1_rows, retrieval_query)
+    lexical_ids = list(branch_trace.get("lexical_candidate_ids", []))
+    dense_ids = list(branch_trace.get("dense_candidate_ids", []))
+    gold_in_lexical = bool(gold_section_ids & set(lexical_ids))
+    gold_in_dense = bool(gold_section_ids & set(dense_ids))
+    source_breakdown = {"lexical": 0, "dense": 0, "both": 0, "unknown": 0}
+    for document in final_documents:
+        sources = list(document.metadata.get("hybrid_sources", []))
+        if "lexical" in sources and "dense" in sources:
+            source_breakdown["both"] += 1
+        elif "lexical" in sources:
+            source_breakdown["lexical"] += 1
+        elif "dense" in sources:
+            source_breakdown["dense"] += 1
+        else:
+            source_breakdown["unknown"] += 1
+    return {
+        "lexical_stage1_candidate_ids": lexical_ids,
+        "dense_stage1_candidate_ids": dense_ids,
+        "gold_in_lexical_pool": gold_in_lexical,
+        "gold_in_dense_pool": gold_in_dense,
+        "gold_only_in_lexical": gold_in_lexical and not gold_in_dense,
+        "gold_only_in_dense": gold_in_dense and not gold_in_lexical,
+        "gold_in_both_pools": gold_in_lexical and gold_in_dense,
+        "final_topk_source_breakdown": source_breakdown,
+    }
+
+
 def _process_sample(
     *,
     sample,
@@ -113,12 +367,13 @@ def _process_sample(
     rewritten_sample = sample.model_copy(update={"question": rewrite_result.rewritten_query})
     rewritten_skeleton = skeleton_extractor.extract(rewritten_sample, mode="stub_predicted")
     rewrite_diagnostics = evaluate_rewrite_diagnostics(original_skeleton, rewritten_skeleton)
+    retrieval_query = rewrite_result.query_for_retrieval(trace_metadata["retrieval_mode"])
 
     if scorer_mode == "plain":
-        documents = text_retriever.retrieve(rewrite_result.rewritten_query, top_k=top_k)
+        documents = text_retriever.retrieve(retrieval_query, top_k=top_k)
         retrieval_trace = {
             "mode": "plain",
-            "stage1_query": rewrite_result.rewritten_query,
+            "stage1_query": _serialize_stage1_query(retrieval_query),
             "query_source": "rewrite_mode",
         }
     elif scorer_mode == "relation_driven":
@@ -128,7 +383,7 @@ def _process_sample(
             top_k=top_k,
             use_relation_driven=True,
             use_skeleton_rewrite=False,
-            query_override=rewrite_result.rewritten_query,
+            query_override=retrieval_query,
         )
         documents = retrieve_result.documents
         retrieval_trace = retrieve_result.details
@@ -137,22 +392,50 @@ def _process_sample(
 
     retrieved_section_ids = [item.section_id for item in documents]
     gold_section_ids = {item.section_id for item in sample.evidence}
+    stage1_rows = _extract_stage1_rows(
+        scorer_mode=scorer_mode,
+        retrieval_query=retrieval_query,
+        documents=documents,
+        retrieval_trace=retrieval_trace,
+    )
     retrieval_metrics = evaluate_retrieval_ids(gold_section_ids, retrieved_section_ids, top_k)
+    gold_trace = _gold_trace_payload(
+        gold_section_ids=gold_section_ids,
+        stage1_rows=stage1_rows,
+        final_topk_ids=retrieved_section_ids,
+        retrieval_trace=retrieval_trace,
+    )
+    hybrid_trace = _hybrid_source_payload(
+        retrieval_mode=trace_metadata["retrieval_mode"],
+        gold_section_ids=gold_section_ids,
+        stage1_rows=stage1_rows,
+        final_documents=documents,
+        retrieval_query=retrieval_query,
+    )
+    stage1_query_payload = _serialize_stage1_query(retrieval_query)
 
     row = {
         "sample_id": sample.question_id,
         "question": sample.question,
+        "original_question": sample.question,
         "rewrite_mode": rewrite_mode,
         "retrieval_mode": trace_metadata["retrieval_mode"],
         "scorer_mode": scorer_mode,
         "rewritten_query": rewrite_result.rewritten_query,
+        "lexical_query": rewrite_result.lexical_query,
+        "dense_query": rewrite_result.dense_query,
+        "structured_rewrite": rewrite_result.structured_rewrite(),
         "original_skeleton": _skeleton_dict(original_skeleton),
         "rewritten_skeleton": _skeleton_dict(rewritten_skeleton),
         "rewrite_diagnostics": rewrite_diagnostics,
         "gold_evidence_section_ids": sorted(gold_section_ids),
+        "stage1_query": stage1_query_payload,
+        "stage1_query_source": retrieval_trace.get("query_source", "rewrite_mode"),
         "retrieved_section_ids": retrieved_section_ids,
         "retrieved_documents": [_truncate_document(item) for item in documents],
         "retrieval_metrics": retrieval_metrics,
+        **gold_trace,
+        **hybrid_trace,
         "trace_metadata": {
             **trace_metadata,
             "skeleton_mode": skeleton_mode,
@@ -213,7 +496,11 @@ def run_retrieval_lab(
     overwrite: bool = False,
     llm_rewrite_max_tokens: int = 64,
     llm_rewrite_temperature: float = 0.0,
+    enable_debug_trace: bool = True,
+    record_stage1_pool: bool = True,
+    record_hybrid_branch_trace: bool = True,
 ) -> Path:
+    del enable_debug_trace, record_stage1_pool, record_hybrid_branch_trace
     samples = load_benchmark_samples(dataset)
     if limit is not None:
         samples = samples[:limit]
@@ -237,7 +524,8 @@ def run_retrieval_lab(
         llm_temperature=llm_rewrite_temperature,
     )
 
-    llm_client = skeleton_llm_client if "llm" in rewrite_modes else None
+    llm_rewrite_mode_names = {"llm", "sparse_llm", "dense_llm", "hybrid_llm"}
+    llm_client = skeleton_llm_client if any(mode in llm_rewrite_mode_names for mode in rewrite_modes) else None
     query_rewriter = RetrievalLabQueryRewriter(
         llm_client=llm_client,
         llm_max_tokens=llm_rewrite_max_tokens,
@@ -385,20 +673,23 @@ def run_retrieval_lab(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run retrieval-only Ours lab with rewrite diagnosis.")
-    parser.add_argument("--dataset", type=Path, default=Path("outputs/two_file_demo/benchmark_dataset.jsonl"))
-    parser.add_argument("--sections", type=Path, default=Path("artifacts/two_file_demo/markdown_sections.jsonl"))
-    parser.add_argument("--knowledge", type=Path, default=Path("artifacts/two_file_demo/knowledge_extraction.jsonl"))
+    parser.add_argument("--dataset", type=Path, default=Path("outputs/full_run/benchmark_dataset.jsonl"))
+    parser.add_argument("--sections", type=Path, default=Path("artifacts/full_run/markdown_sections.jsonl"))
+    parser.add_argument("--knowledge", type=Path, default=Path("artifacts/full_run/knowledge_extraction.jsonl"))
     parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--skeleton-mode", choices=["oracle", "stub_predicted", "llm_predicted"], default="oracle")
-    parser.add_argument("--rewrite-modes", default="original,template,rule_based")
-    parser.add_argument("--retrieval-modes", default="lexical")
+    parser.add_argument("--rewrite-modes", default="original,splicing,sparse_llm,dense_llm,hybrid_llm")
+    parser.add_argument("--retrieval-modes", default="lexical,dense,hybrid")
     parser.add_argument("--scorer-modes", default="plain,relation_driven")
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/ours_retrieval_lab"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments/ours_rewrite_comparison"))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--llm-rewrite-max-tokens", type=int, default=64)
     parser.add_argument("--llm-rewrite-temperature", type=float, default=0.0)
+    parser.add_argument("--enable-debug-trace", action="store_true", default=True)
+    parser.add_argument("--record-stage1-pool", action="store_true", default=True)
+    parser.add_argument("--record-hybrid-branch-trace", action="store_true", default=True)
     return parser.parse_args()
 
 
@@ -419,6 +710,9 @@ def main() -> None:
         overwrite=args.overwrite,
         llm_rewrite_max_tokens=args.llm_rewrite_max_tokens,
         llm_rewrite_temperature=args.llm_rewrite_temperature,
+        enable_debug_trace=args.enable_debug_trace,
+        record_stage1_pool=args.record_stage1_pool,
+        record_hybrid_branch_trace=args.record_hybrid_branch_trace,
     )
     print(f"outputs: {output_path}")
 

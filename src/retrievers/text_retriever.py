@@ -17,8 +17,21 @@ from runtime_config import RuntimeSettings
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class TextRetrieverQuery:
+    lexical_query: str
+    dense_query: str
+
+    def for_mode(self, retrieval_mode: str) -> str:
+        if retrieval_mode == "lexical":
+            return self.lexical_query or self.dense_query
+        if retrieval_mode == "dense":
+            return self.dense_query or self.lexical_query
+        raise ValueError(f"Unsupported retrieval mode for single-query fallback: {retrieval_mode}")
+
+
 class SupportsRetrieve(Protocol):
-    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
+    def retrieve(self, query: str | TextRetrieverQuery, top_k: int) -> list[RetrievedDocument]:
         ...
 
 
@@ -26,16 +39,18 @@ class SupportsRetrieve(Protocol):
 class LexicalTextRetriever:
     index: PublicIndex
 
-    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
-        return self.index.search(query, top_k=top_k)
+    def retrieve(self, query: str | TextRetrieverQuery, top_k: int) -> list[RetrievedDocument]:
+        resolved_query = query.lexical_query if isinstance(query, TextRetrieverQuery) else query
+        return self.index.search(resolved_query, top_k=top_k)
 
 
 @dataclass(slots=True)
 class DenseTextRetriever:
     store: QdrantStore
 
-    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
-        return self.store.search_by_query_vector(query, top_k=top_k)
+    def retrieve(self, query: str | TextRetrieverQuery, top_k: int) -> list[RetrievedDocument]:
+        resolved_query = query.dense_query if isinstance(query, TextRetrieverQuery) else query
+        return self.store.search_by_query_vector(resolved_query, top_k=top_k)
 
 
 @dataclass(slots=True)
@@ -43,27 +58,46 @@ class HybridTextRetriever:
     lexical: LexicalTextRetriever
     dense: DenseTextRetriever
 
-    def retrieve(self, query: str, top_k: int) -> list[RetrievedDocument]:
+    def retrieve(self, query: str | TextRetrieverQuery, top_k: int) -> list[RetrievedDocument]:
         lexical_docs = self.lexical.retrieve(query, top_k=top_k)
         dense_docs = self.dense.retrieve(query, top_k=top_k)
+        lexical_scores = {document.section_id: float(document.score) for document in lexical_docs}
+        dense_scores = {document.section_id: float(document.score) for document in dense_docs}
 
         merged: dict[str, RetrievedDocument] = {}
         combined_scores: dict[str, float] = {}
 
         for document in lexical_docs:
-            merged[document.section_id] = document
+            merged[document.section_id] = document.model_copy(
+                update={
+                    "metadata": {
+                        **document.metadata,
+                        "lexical_score": float(document.score),
+                        "hybrid_sources": ["lexical"],
+                    }
+                }
+            )
             combined_scores[document.section_id] = combined_scores.get(document.section_id, 0.0) + float(document.score)
 
         for document in dense_docs:
             existing = merged.get(document.section_id)
             if existing is None:
-                merged[document.section_id] = document
+                merged[document.section_id] = document.model_copy(
+                    update={
+                        "metadata": {
+                            **document.metadata,
+                            "dense_score": float(document.score),
+                            "hybrid_sources": ["dense"],
+                        }
+                    }
+                )
             else:
                 merged[document.section_id] = existing.model_copy(
                     update={
                         "score": max(float(existing.score), float(document.score)),
                         "metadata": {
                             **existing.metadata,
+                            "lexical_score": float(existing.metadata.get("lexical_score", existing.score)),
                             "dense_score": float(document.score),
                             "hybrid_sources": ["lexical", "dense"],
                         },
@@ -79,6 +113,14 @@ class HybridTextRetriever:
                 **document.metadata,
                 "hybrid_score": combined_scores[section_id],
                 "retriever": "hybrid_retriever",
+                "hybrid_branch_trace": {
+                    "lexical_query": query.lexical_query if isinstance(query, TextRetrieverQuery) else query,
+                    "dense_query": query.dense_query if isinstance(query, TextRetrieverQuery) else query,
+                    "lexical_candidate_ids": [item.section_id for item in lexical_docs],
+                    "dense_candidate_ids": [item.section_id for item in dense_docs],
+                    "lexical_candidate_scores": lexical_scores,
+                    "dense_candidate_scores": dense_scores,
+                },
             }
             if "hybrid_sources" not in metadata:
                 metadata["hybrid_sources"] = ["lexical"]
